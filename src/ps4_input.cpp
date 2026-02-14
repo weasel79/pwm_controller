@@ -34,51 +34,80 @@ void PS4Input::update() {
     int l2 = PS4.L2Value();   // 0..255
     int r2 = PS4.R2Value();
 
+#if LOG_LEVEL >= 2
+    bool doTrace = (now - _lastTraceMs >= 1000);
+    if (doTrace) {
+        _lastTraceMs = now;
+        Serial.printf("[%lu] PS4: LX=%d LY=%d RX=%d RY=%d L2=%d R2=%d\n",
+                      now, lx, ly, rx, ry, l2, r2);
+    }
+#else
+    bool doTrace = false;
+#endif
+
     for (uint8_t ch = 0; ch < NUM_OUTPUTS; ch++) {
         const OutputChannel& oc = _outputCtrl->getChannel(ch);
         uint8_t val = 0;
+        const char* srcName = nullptr;
 
         switch (oc.inputSource) {
             case INPUT_PS4_LX:
                 val = (uint8_t)map(lx, -128, 127, 0, 180);
+                srcName = "LX";
                 break;
             case INPUT_PS4_LY:
                 val = (uint8_t)map(ly, -128, 127, 0, 180);
+                srcName = "LY";
                 break;
             case INPUT_PS4_RX:
                 val = (uint8_t)map(rx, -128, 127, 0, 180);
+                srcName = "RX";
                 break;
             case INPUT_PS4_RY:
                 val = (uint8_t)map(ry, -128, 127, 0, 180);
+                srcName = "RY";
                 break;
             case INPUT_PS4_L2:
                 val = (uint8_t)map(l2, 0, 255, 0, 180);
+                srcName = "L2";
                 break;
             case INPUT_PS4_R2:
                 val = (uint8_t)map(r2, 0, 255, 0, 180);
+                srcName = "R2";
                 break;
             case INPUT_PS4_CROSS:
                 val = PS4.Cross() ? 180 : 0;
+                srcName = "CROSS";
                 break;
             case INPUT_PS4_CIRCLE:
                 val = PS4.Circle() ? 180 : 0;
+                srcName = "CIRCLE";
                 break;
             case INPUT_PS4_SQUARE:
                 val = PS4.Square() ? 180 : 0;
+                srcName = "SQUARE";
                 break;
             case INPUT_PS4_TRIANGLE:
                 val = PS4.Triangle() ? 180 : 0;
+                srcName = "TRI";
                 break;
             case INPUT_PS4_L1:
                 val = PS4.L1() ? 180 : 0;
+                srcName = "L1";
                 break;
             case INPUT_PS4_R1:
                 val = PS4.R1() ? 180 : 0;
+                srcName = "R1";
                 break;
             default:
                 continue; // Not a PS4 input source
         }
 
+#if LOG_LEVEL >= 2
+        if (doTrace) {
+            Serial.printf("[%lu] PS4 %s -> ch%d: val=%d\n", now, srcName, ch, val);
+        }
+#endif
         _outputCtrl->setValue(ch, val);
     }
 }

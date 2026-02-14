@@ -1,6 +1,19 @@
 #include "output_controller.h"
 #include <Wire.h>
 
+static const char* _inputSourceName(InputSource s) {
+    switch (s) {
+        case INPUT_MANUAL: return "manual"; case INPUT_ENVELOPE: return "envelope";
+        case INPUT_POT: return "pot"; case INPUT_PS4_LX: return "ps4_lx";
+        case INPUT_PS4_LY: return "ps4_ly"; case INPUT_PS4_RX: return "ps4_rx";
+        case INPUT_PS4_RY: return "ps4_ry"; case INPUT_PS4_L2: return "ps4_l2";
+        case INPUT_PS4_R2: return "ps4_r2"; case INPUT_PS4_CROSS: return "ps4_cross";
+        case INPUT_PS4_CIRCLE: return "ps4_circle"; case INPUT_PS4_SQUARE: return "ps4_square";
+        case INPUT_PS4_TRIANGLE: return "ps4_tri"; case INPUT_PS4_L1: return "ps4_l1";
+        case INPUT_PS4_R1: return "ps4_r1"; default: return "?";
+    }
+}
+
 void OutputController::init() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     _pca.begin();
@@ -37,6 +50,18 @@ void OutputController::setValue(uint8_t channel, uint8_t value) {
         _channels[channel].currentValue = value;
         _writePWM(channel, value);
     }
+
+#if LOG_LEVEL >= 2
+    static unsigned long _lastTraceMs[NUM_OUTPUTS] = {};
+    unsigned long now = millis();
+    uint8_t oldVal = _channels[channel].currentValue;
+    if (oldVal != value && (now - _lastTraceMs[channel] >= 1000)) {
+        _lastTraceMs[channel] = now;
+        Serial.printf("[%lu] SET -> ch%d: %d -> %d (src=%s)\n",
+                      now, channel, oldVal, value,
+                      _inputSourceName(_channels[channel].inputSource));
+    }
+#endif
 }
 
 uint8_t OutputController::getValue(uint8_t channel) const {
@@ -82,7 +107,14 @@ void OutputController::setChannelType(uint8_t channel, OutputType type) {
 
 void OutputController::setChannelInput(uint8_t channel, InputSource src) {
     if (channel >= NUM_OUTPUTS) return;
+#if LOG_LEVEL >= 1
+    InputSource old = _channels[channel].inputSource;
+#endif
     _channels[channel].inputSource = src;
+#if LOG_LEVEL >= 1
+    Serial.printf("[%lu] API -> ch%d: input %s -> %s\n",
+                  millis(), channel, _inputSourceName(old), _inputSourceName(src));
+#endif
 }
 
 void OutputController::setSmoothingSteps(uint8_t steps) {

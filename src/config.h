@@ -48,5 +48,9 @@
 #define PS4_CONTROLLER_MAC  "1a:2b:3c:01:01:01"
 #define PS4_UPDATE_MS       20
 
+// ---- Logging ----
+// 0=ERROR, 1=INFO, 2=DEBUG (verbose traces)
+#define LOG_LEVEL           1
+
 // ---- Web Server ----
 #define WEB_SERVER_PORT     80

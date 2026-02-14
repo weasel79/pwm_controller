@@ -16,4 +16,7 @@ private:
     bool _connected = false;
     bool _wasConnected = false;
     unsigned long _lastUpdateMs = 0;
+#if LOG_LEVEL >= 2
+    unsigned long _lastTraceMs = 0;
+#endif
 };

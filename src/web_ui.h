@@ -170,7 +170,6 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
   </div>
   <div id="otaProgress"><div class="bar" id="otaBar" style="width:0%"></div></div>
 </div>
-
 <script>
 const NUM = 16;
 let angles = new Array(NUM).fill(90);
@@ -302,7 +301,7 @@ function onTypeChange(ch, type) {
 function onInputChange(ch, src) {
   inputs[ch] = src;
   updateInputStyle(ch);
-  fetch('/api/output/input', {
+  fetch('/api/input', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({channel: ch, input: src})

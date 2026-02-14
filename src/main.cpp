@@ -50,19 +50,31 @@ void setup() {
     // analogInput.addJoystick(JOY1_X_PIN, JOY1_Y_PIN, 4, 5); // Joystick -> Output 4,5
 
     Serial.printf("[Heap] Free: %lu bytes\n", (unsigned long)ESP.getFreeHeap());
+    Serial.printf("[Log] Level: %d (%s)\n", LOG_LEVEL,
+                  LOG_LEVEL == 0 ? "ERROR" : LOG_LEVEL == 1 ? "INFO" : "DEBUG");
     Serial.println("=== Output Controller Ready ===\n");
 }
 
 void loop() {
-    // Read PS4 controller inputs
     ps4Input.update();
-
-    // Read analog inputs and update outputs
     analogInput.update();
-
-    // Advance sequence playback / recording
     sequenceRecorder.update();
-
-    // Smooth output movement (if smoothing enabled)
     outputController.update();
+
+#if LOG_LEVEL >= 2
+    static unsigned long _lastDumpMs = 0;
+    unsigned long now = millis();
+    if (now - _lastDumpMs >= 5000) {
+        _lastDumpMs = now;
+        String line = "[" + String(now) + "] INPUTS:";
+        for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
+            const OutputChannel& ch = outputController.getChannel(i);
+            if (ch.inputSource != INPUT_MANUAL) {
+                line += " ch" + String(i) + "=" + String(ch.inputSource);
+            }
+        }
+        line += " | PS4=" + String(ps4Input.isConnected() ? "YES" : "NO");
+        Serial.println(line.c_str());
+    }
+#endif
 }

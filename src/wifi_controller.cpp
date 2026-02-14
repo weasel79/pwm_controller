@@ -208,8 +208,8 @@ void WiFiController::_setupRoutes() {
         }
     );
 
-    // POST /api/output/input - set channel input source
-    _server.on("/api/output/input", HTTP_POST,
+    // POST /api/input - set channel input source
+    _server.on("/api/input", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
         [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
