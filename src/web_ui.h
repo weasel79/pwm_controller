@@ -6,7 +6,7 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Servo Controller</title>
+<title>Output Controller</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -18,26 +18,31 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
     display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 12px; max-width: 1200px; margin: 0 auto;
   }
-  .servo-card {
+  .output-card {
     background: #16213e; border-radius: 8px; padding: 12px;
     border: 1px solid #0f3460;
   }
-  .servo-card .header {
+  .output-card .header {
     display: flex; justify-content: space-between; align-items: center;
     margin-bottom: 8px;
   }
-  .servo-card .name { font-weight: 600; font-size: 14px; }
-  .servo-card .angle {
+  .output-card .name { font-weight: 600; font-size: 14px; }
+  .output-card .angle {
     font-size: 20px; font-weight: 700; color: #e94560;
     min-width: 42px; text-align: right;
   }
-  .servo-card input[type=range] {
+  .output-card input[type=range] {
     width: 100%; height: 6px; -webkit-appearance: none; appearance: none;
     background: #0f3460; border-radius: 3px; outline: none;
   }
-  .servo-card input[type=range]::-webkit-slider-thumb {
+  .output-card input[type=range]::-webkit-slider-thumb {
     -webkit-appearance: none; width: 20px; height: 20px;
     background: #e94560; border-radius: 50%; cursor: pointer;
+  }
+  .output-card select {
+    background: #0f3460; color: #eee; border: 1px solid #1a3a5c;
+    border-radius: 4px; padding: 2px 4px; font-size: 11px; cursor: pointer;
+    margin-right: 8px;
   }
   .controls {
     max-width: 1200px; margin: 20px auto 12px;
@@ -109,10 +114,41 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
   }
   .btn-env-play { background: #0f3460; color: #fff; }
   .btn-env-stop { background: #e94560; color: #fff; }
+  .output-card .input-row {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 11px;
+  }
+  .output-card .input-row label { color: #888; }
+  .output-card .input-row select {
+    background: #0f3460; color: #eee; border: 1px solid #1a3a5c;
+    border-radius: 4px; padding: 2px 4px; font-size: 11px; cursor: pointer;
+  }
+  .output-card.ext-input input[type=range] { opacity: 0.4; pointer-events: none; }
+  .ota-section {
+    max-width: 1200px; margin: 16px auto;
+    background: #16213e; border-radius: 8px; padding: 12px;
+    border: 1px solid #0f3460;
+  }
+  .ota-section h3 { margin-bottom: 8px; }
+  .ota-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ota-form input[type=file] { color: #aaa; font-size: 13px; }
+  .btn-ota {
+    padding: 6px 16px; border: none; border-radius: 4px;
+    background: #533483; color: #fff; font-size: 13px;
+    font-weight: 600; cursor: pointer;
+  }
+  .btn-ota:disabled { opacity: 0.5; cursor: not-allowed; }
+  #otaProgress {
+    width: 100%; height: 6px; background: #0f3460; border-radius: 3px;
+    margin-top: 8px; display: none;
+  }
+  #otaProgress .bar {
+    height: 100%; background: #e94560; border-radius: 3px;
+    transition: width 0.2s;
+  }
 </style>
 </head>
 <body>
-<h1>Servo Controller</h1>
+<h1>Output Controller</h1>
 <div id="status">Connecting...</div>
 <div class="controls">
   <button class="btn-rec" onclick="seqRecord()">Record</button>
@@ -120,37 +156,83 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
   <button class="btn-play" onclick="seqPlayLast()">Play Last</button>
   <button class="btn-save" onclick="seqSave()">Save</button>
 </div>
-<div class="grid" id="servos"></div>
+<div class="grid" id="outputs"></div>
 <div class="seq-section">
   <h3>Saved Sequences</h3>
   <ul class="seq-list" id="seqList"><li>Loading...</li></ul>
+</div>
+<div class="ota-section">
+  <h3>Firmware Update</h3>
+  <div class="ota-form">
+    <input type="file" id="otaFile" accept=".bin">
+    <button class="btn-ota" id="otaBtn" onclick="otaUpload()">Upload</button>
+    <span id="otaStatus" style="font-size:13px;color:#aaa;"></span>
+  </div>
+  <div id="otaProgress"><div class="bar" id="otaBar" style="width:0%"></div></div>
 </div>
 
 <script>
 const NUM = 16;
 let angles = new Array(NUM).fill(90);
+let types = new Array(NUM).fill('servo');
+let inputs = new Array(NUM).fill('manual');
 let envelopes = [];
 for (let i = 0; i < NUM; i++) {
   envelopes.push({
     points: [{t: 0, a: 90}, {t: 2.0, a: 90}],
     duration: 2.0, loop: false, playing: false,
     timer: null, startTime: 0, expanded: false,
-    dragging: -1, canvasReady: false
+    dragging: -1, canvasReady: false,
+    rafId: null, sendTimer: null
   });
 }
 
+function formatValue(ch, val) {
+  if (types[ch] === 'motor' || types[ch] === 'lego' || types[ch] === 'pwm' || types[ch] === 'motor1k') {
+    return Math.round(val * 100 / 180) + '%';
+  }
+  return val + '\u00B0';
+}
+
 function init() {
-  const grid = document.getElementById('servos');
+  const grid = document.getElementById('outputs');
   for (let i = 0; i < NUM; i++) {
     const card = document.createElement('div');
-    card.className = 'servo-card';
+    card.className = 'output-card';
     card.innerHTML = `
       <div class="header">
-        <span class="name" id="name${i}">Servo ${i}</span>
+        <span class="name" id="name${i}">Output ${i}</span>
         <span style="display:flex;align-items:center;">
+          <select id="type${i}" onchange="onTypeChange(${i}, this.value)">
+            <option value="servo">Servo</option>
+            <option value="motor">Motor</option>
+            <option value="lego">Lego</option>
+            <option value="pwm">PWM</option>
+            <option value="motor1k">Motor 1kHz</option>
+          </select>
           <button class="btn-env" id="envBtn${i}" onclick="toggleEnvelope(${i})">Env</button>
           <span class="angle" id="val${i}">90</span>
         </span>
+      </div>
+      <div class="input-row">
+        <label>Input:</label>
+        <select id="in${i}" onchange="onInputChange(${i}, this.value)">
+          <option value="manual">Manual</option>
+          <option value="envelope">Envelope</option>
+          <option value="pot">Pot</option>
+          <option value="ps4_lx">PS4 L-Stick X</option>
+          <option value="ps4_ly">PS4 L-Stick Y</option>
+          <option value="ps4_rx">PS4 R-Stick X</option>
+          <option value="ps4_ry">PS4 R-Stick Y</option>
+          <option value="ps4_l2">PS4 L2</option>
+          <option value="ps4_r2">PS4 R2</option>
+          <option value="ps4_cross">Cross</option>
+          <option value="ps4_circle">Circle</option>
+          <option value="ps4_square">Square</option>
+          <option value="ps4_triangle">Triangle</option>
+          <option value="ps4_l1">PS4 L1</option>
+          <option value="ps4_r1">PS4 R1</option>
+        </select>
       </div>
       <input type="range" min="0" max="180" value="90" id="sl${i}"
         oninput="onSlider(${i}, this.value)">
@@ -171,14 +253,23 @@ function init() {
 }
 
 function fetchState() {
-  fetch('/api/servos').then(r => r.json()).then(data => {
+  fetch('/api/outputs').then(r => r.json()).then(data => {
     if (Array.isArray(data)) {
       data.forEach((s, i) => {
         if (i < NUM) {
           angles[i] = s.angle;
           document.getElementById('sl' + i).value = s.angle;
-          document.getElementById('val' + i).textContent = s.angle;
+          if (s.type) {
+            types[i] = s.type;
+            document.getElementById('type' + i).value = s.type;
+          }
+          document.getElementById('val' + i).textContent = formatValue(i, s.angle);
           if (s.name) document.getElementById('name' + i).textContent = s.name;
+          if (s.input) {
+            inputs[i] = s.input;
+            document.getElementById('in' + i).value = s.input;
+            updateInputStyle(i);
+          }
         }
       });
     }
@@ -189,6 +280,44 @@ function fetchState() {
   });
 }
 
+function onTypeChange(ch, type) {
+  types[ch] = type;
+  var defVal = (type === 'servo') ? 90 : 0;
+  angles[ch] = defVal;
+  document.getElementById('sl' + ch).value = defVal;
+  document.getElementById('val' + ch).textContent = formatValue(ch, defVal);
+  fetch('/api/output/type', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel: ch, type: type})
+  }).then(() => {
+    fetch('/api/output', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({channel: ch, angle: defVal})
+    }).catch(() => {});
+  }).catch(() => {});
+}
+
+function onInputChange(ch, src) {
+  inputs[ch] = src;
+  updateInputStyle(ch);
+  fetch('/api/output/input', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel: ch, input: src})
+  }).catch(() => {});
+}
+
+function updateInputStyle(ch) {
+  var card = document.getElementById('sl' + ch).closest('.output-card');
+  if (inputs[ch] !== 'manual') {
+    card.classList.add('ext-input');
+  } else {
+    card.classList.remove('ext-input');
+  }
+}
+
 let sendTimer = null;
 let pendingChannel = -1;
 let pendingAngle = 0;
@@ -196,13 +325,13 @@ let pendingAngle = 0;
 function onSlider(ch, val) {
   val = parseInt(val);
   angles[ch] = val;
-  document.getElementById('val' + ch).textContent = val;
+  document.getElementById('val' + ch).textContent = formatValue(ch, val);
 
   pendingChannel = ch;
   pendingAngle = val;
   if (!sendTimer) {
     sendTimer = setTimeout(() => {
-      fetch('/api/servo', {
+      fetch('/api/output', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({channel: pendingChannel, angle: pendingAngle})
@@ -530,36 +659,88 @@ function envPlay(ch) {
   var btn = document.getElementById('envPlayBtn' + ch);
   btn.textContent = 'Stop';
   btn.className = 'btn-env-stop';
-  env.timer = setInterval(function() {
+
+  function frame() {
+    if (!env.playing) return;
     var elapsed = (performance.now() - env.startTime) / 1000;
-    var t;
-    if (env.loop) {
-      t = elapsed % env.duration;
-    } else {
-      t = elapsed;
-      if (t > env.duration) { envStop(ch); return; }
-    }
+    var t = env.loop ? (elapsed % env.duration) : elapsed;
+    if (!env.loop && t > env.duration) { envStop(ch); return; }
     var angle = envInterpolate(env, t);
-    fetch('/api/servo', {
+    document.getElementById('sl' + ch).value = angle;
+    document.getElementById('val' + ch).textContent = formatValue(ch, angle);
+    angles[ch] = angle;
+    drawEnvelope(ch);
+    env.rafId = requestAnimationFrame(frame);
+  }
+
+  function sendLoop() {
+    if (!env.playing) return;
+    var elapsed = (performance.now() - env.startTime) / 1000;
+    var t = env.loop ? (elapsed % env.duration) : Math.min(elapsed, env.duration);
+    var angle = envInterpolate(env, t);
+    fetch('/api/output', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({channel: ch, angle: angle})
-    }).catch(function() {});
-    document.getElementById('sl' + ch).value = angle;
-    document.getElementById('val' + ch).textContent = angle;
-    angles[ch] = angle;
-    drawEnvelope(ch);
-  }, 50);
+    }).catch(function() {}).finally(function() {
+      if (env.playing) env.sendTimer = setTimeout(sendLoop, 50);
+    });
+  }
+
+  env.rafId = requestAnimationFrame(frame);
+  sendLoop();
 }
 
 function envStop(ch) {
   var env = envelopes[ch];
   env.playing = false;
+  if (env.rafId) { cancelAnimationFrame(env.rafId); env.rafId = null; }
+  if (env.sendTimer) { clearTimeout(env.sendTimer); env.sendTimer = null; }
   if (env.timer) { clearInterval(env.timer); env.timer = null; }
   var btn = document.getElementById('envPlayBtn' + ch);
   btn.textContent = 'Play';
   btn.className = 'btn-env-play';
   drawEnvelope(ch);
+}
+
+function otaUpload() {
+  var file = document.getElementById('otaFile').files[0];
+  if (!file) { document.getElementById('otaStatus').textContent = 'Select a .bin file'; return; }
+  var btn = document.getElementById('otaBtn');
+  var status = document.getElementById('otaStatus');
+  var prog = document.getElementById('otaProgress');
+  var bar = document.getElementById('otaBar');
+  btn.disabled = true;
+  prog.style.display = 'block';
+  bar.style.width = '0%';
+  status.textContent = 'Uploading...';
+
+  var form = new FormData();
+  form.append('firmware', file);
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/ota');
+  xhr.upload.onprogress = function(e) {
+    if (e.lengthComputable) {
+      var pct = Math.round(e.loaded * 100 / e.total);
+      bar.style.width = pct + '%';
+      status.textContent = 'Uploading... ' + pct + '%';
+    }
+  };
+  xhr.onload = function() {
+    if (xhr.status === 200) {
+      bar.style.width = '100%';
+      status.textContent = 'Done! Rebooting...';
+      setTimeout(function() { location.reload(); }, 5000);
+    } else {
+      status.textContent = 'Failed: ' + xhr.responseText;
+      btn.disabled = false;
+    }
+  };
+  xhr.onerror = function() {
+    status.textContent = 'Upload error';
+    btn.disabled = false;
+  };
+  xhr.send(form);
 }
 
 init();

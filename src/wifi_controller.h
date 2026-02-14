@@ -4,16 +4,16 @@
 #include <ESPAsyncWebServer.h>
 #include "config.h"
 
-class ServoController;
+class OutputController;
 class SequenceRecorder;
 
 class WiFiController {
 public:
-    void init(ServoController* servoCtrl, SequenceRecorder* seqRec);
+    void init(OutputController* outputCtrl, SequenceRecorder* seqRec);
 
 private:
     AsyncWebServer _server{WEB_SERVER_PORT};
-    ServoController* _servoCtrl = nullptr;
+    OutputController* _outputCtrl = nullptr;
     SequenceRecorder* _seqRec = nullptr;
 
     void _setupWiFi();

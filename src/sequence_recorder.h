@@ -5,14 +5,14 @@
 
 struct SequenceFrame {
     uint32_t timestampMs;
-    uint8_t  angles[NUM_SERVOS];
+    uint8_t  values[NUM_OUTPUTS];
 };
 
-class ServoController;
+class OutputController;
 
 class SequenceRecorder {
 public:
-    void init(ServoController* servoCtrl);
+    void init(OutputController* outputCtrl);
     void update(); // Call in loop()
 
     // Recording
@@ -32,9 +32,11 @@ public:
     String listSequencesJson();
 
     uint16_t frameCount() const { return _frameCount; }
+    void freeBuffer();
 
 private:
-    ServoController* _servoCtrl = nullptr;
+    bool _allocBuffer();
+    OutputController* _outputCtrl = nullptr;
 
     // Recording buffer
     SequenceFrame* _frames = nullptr;

@@ -1,9 +1,10 @@
 #include "wifi_controller.h"
-#include "servo_controller.h"
+#include "output_controller.h"
 #include "sequence_recorder.h"
 #include "web_ui.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#include <Update.h>
 #include <esp_wifi.h>
 #include <esp_coexist.h>
 #include <esp_event.h>
@@ -32,8 +33,8 @@ static void _wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
 }
 
-void WiFiController::init(ServoController* servoCtrl, SequenceRecorder* seqRec) {
-    _servoCtrl = servoCtrl;
+void WiFiController::init(OutputController* outputCtrl, SequenceRecorder* seqRec) {
+    _outputCtrl = outputCtrl;
     _seqRec = seqRec;
     WiFi.onEvent(_wifiEventHandler);
     _setupWiFi();
@@ -88,7 +89,7 @@ void WiFiController::_setupWiFi() {
 }
 
 void WiFiController::_setupRoutes() {
-    ServoController* sc = _servoCtrl;
+    OutputController* sc = _outputCtrl;
     SequenceRecorder* sr = _seqRec;
 
     // Serve Web UI
@@ -96,24 +97,48 @@ void WiFiController::_setupRoutes() {
         request->send_P(200, "text/html", WEB_UI_HTML);
     });
 
-    // GET /api/servos - get all servo positions
-    _server.on("/api/servos", HTTP_GET, [sc](AsyncWebServerRequest* request) {
+    // GET /api/outputs - get all output channel states
+    _server.on("/api/outputs", HTTP_GET, [sc](AsyncWebServerRequest* request) {
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
-        for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+        for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
             JsonObject obj = arr.add<JsonObject>();
-            const ServoChannel& ch = sc->getChannel(i);
+            const OutputChannel& ch = sc->getChannel(i);
             obj["channel"] = ch.channel;
-            obj["angle"] = ch.currentAngle;
+            obj["angle"] = ch.currentValue;
             obj["name"] = ch.name;
+            switch (ch.type) {
+                case OUTPUT_SERVO: obj["type"] = "servo"; break;
+                case OUTPUT_MOTOR: obj["type"] = "motor"; break;
+                case OUTPUT_LEGO:  obj["type"] = "lego";  break;
+                case OUTPUT_PWM:      obj["type"] = "pwm";      break;
+                case OUTPUT_MOTOR_1K: obj["type"] = "motor1k";  break;
+            }
+            switch (ch.inputSource) {
+                case INPUT_MANUAL:     obj["input"] = "manual";     break;
+                case INPUT_ENVELOPE:   obj["input"] = "envelope";   break;
+                case INPUT_POT:        obj["input"] = "pot";        break;
+                case INPUT_PS4_LX:     obj["input"] = "ps4_lx";     break;
+                case INPUT_PS4_LY:     obj["input"] = "ps4_ly";     break;
+                case INPUT_PS4_RX:     obj["input"] = "ps4_rx";     break;
+                case INPUT_PS4_RY:     obj["input"] = "ps4_ry";     break;
+                case INPUT_PS4_L2:     obj["input"] = "ps4_l2";     break;
+                case INPUT_PS4_R2:     obj["input"] = "ps4_r2";     break;
+                case INPUT_PS4_CROSS:  obj["input"] = "ps4_cross";  break;
+                case INPUT_PS4_CIRCLE: obj["input"] = "ps4_circle"; break;
+                case INPUT_PS4_SQUARE: obj["input"] = "ps4_square"; break;
+                case INPUT_PS4_TRIANGLE: obj["input"] = "ps4_triangle"; break;
+                case INPUT_PS4_L1:     obj["input"] = "ps4_l1";     break;
+                case INPUT_PS4_R1:     obj["input"] = "ps4_r1";     break;
+            }
         }
         String json;
         serializeJson(doc, json);
         request->send(200, "application/json", json);
     });
 
-    // POST /api/servo - set single servo
-    _server.on("/api/servo", HTTP_POST,
+    // POST /api/output - set single output
+    _server.on("/api/output", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
         [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
@@ -124,13 +149,13 @@ void WiFiController::_setupRoutes() {
             }
             uint8_t channel = doc["channel"] | 0;
             uint8_t angle = doc["angle"] | 90;
-            sc->setAngle(channel, angle);
+            sc->setValue(channel, angle);
             request->send(200, "application/json", "{\"ok\":true}");
         }
     );
 
-    // POST /api/servos - set multiple servos
-    _server.on("/api/servos", HTTP_POST,
+    // POST /api/outputs - set multiple outputs
+    _server.on("/api/outputs", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
         [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
@@ -144,9 +169,78 @@ void WiFiController::_setupRoutes() {
                 request->send(400, "application/json", "{\"error\":\"missing angles array\"}");
                 return;
             }
-            for (size_t i = 0; i < angles.size() && i < NUM_SERVOS; i++) {
-                sc->setAngle(i, angles[i].as<uint8_t>());
+            for (size_t i = 0; i < angles.size() && i < NUM_OUTPUTS; i++) {
+                sc->setValue(i, angles[i].as<uint8_t>());
             }
+            request->send(200, "application/json", "{\"ok\":true}");
+        }
+    );
+
+    // POST /api/output/type - set channel output type
+    _server.on("/api/output/type", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        nullptr,
+        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+                request->send(400, "application/json", "{\"error\":\"invalid json\"}");
+                return;
+            }
+            uint8_t channel = doc["channel"] | 0;
+            const char* typeStr = doc["type"] | "";
+            OutputType type;
+            if (strcmp(typeStr, "servo") == 0) {
+                type = OUTPUT_SERVO;
+            } else if (strcmp(typeStr, "motor") == 0) {
+                type = OUTPUT_MOTOR;
+            } else if (strcmp(typeStr, "lego") == 0) {
+                type = OUTPUT_LEGO;
+            } else if (strcmp(typeStr, "pwm") == 0) {
+                type = OUTPUT_PWM;
+            } else if (strcmp(typeStr, "motor1k") == 0) {
+                type = OUTPUT_MOTOR_1K;
+            } else {
+                request->send(400, "application/json", "{\"error\":\"invalid type\"}");
+                return;
+            }
+            sc->setChannelType(channel, type);
+            request->send(200, "application/json", "{\"ok\":true}");
+        }
+    );
+
+    // POST /api/output/input - set channel input source
+    _server.on("/api/output/input", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        nullptr,
+        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+                request->send(400, "application/json", "{\"error\":\"invalid json\"}");
+                return;
+            }
+            uint8_t channel = doc["channel"] | 0;
+            const char* inStr = doc["input"] | "";
+            InputSource src;
+            if (strcmp(inStr, "manual") == 0) src = INPUT_MANUAL;
+            else if (strcmp(inStr, "envelope") == 0) src = INPUT_ENVELOPE;
+            else if (strcmp(inStr, "pot") == 0) src = INPUT_POT;
+            else if (strcmp(inStr, "ps4_lx") == 0) src = INPUT_PS4_LX;
+            else if (strcmp(inStr, "ps4_ly") == 0) src = INPUT_PS4_LY;
+            else if (strcmp(inStr, "ps4_rx") == 0) src = INPUT_PS4_RX;
+            else if (strcmp(inStr, "ps4_ry") == 0) src = INPUT_PS4_RY;
+            else if (strcmp(inStr, "ps4_l2") == 0) src = INPUT_PS4_L2;
+            else if (strcmp(inStr, "ps4_r2") == 0) src = INPUT_PS4_R2;
+            else if (strcmp(inStr, "ps4_cross") == 0) src = INPUT_PS4_CROSS;
+            else if (strcmp(inStr, "ps4_circle") == 0) src = INPUT_PS4_CIRCLE;
+            else if (strcmp(inStr, "ps4_square") == 0) src = INPUT_PS4_SQUARE;
+            else if (strcmp(inStr, "ps4_triangle") == 0) src = INPUT_PS4_TRIANGLE;
+            else if (strcmp(inStr, "ps4_l1") == 0) src = INPUT_PS4_L1;
+            else if (strcmp(inStr, "ps4_r1") == 0) src = INPUT_PS4_R1;
+            else {
+                request->send(400, "application/json", "{\"error\":\"invalid input\"}");
+                return;
+            }
+            sc->setChannelInput(channel, src);
             request->send(200, "application/json", "{\"ok\":true}");
         }
     );
@@ -229,6 +323,43 @@ void WiFiController::_setupRoutes() {
                 request->send(200, "application/json", "{\"ok\":true}");
             } else {
                 request->send(404, "application/json", "{\"error\":\"not found\"}");
+            }
+        }
+    );
+
+    // POST /api/ota - firmware upload
+    _server.on("/api/ota", HTTP_POST,
+        [](AsyncWebServerRequest* request) {
+            bool ok = !Update.hasError();
+            AsyncWebServerResponse* response = request->beginResponse(
+                ok ? 200 : 500, "application/json",
+                ok ? "{\"ok\":true,\"msg\":\"Rebooting...\"}" : "{\"error\":\"Update failed\"}");
+            response->addHeader("Connection", "close");
+            request->send(response);
+            if (ok) {
+                delay(500);
+                ESP.restart();
+            }
+        },
+        [](AsyncWebServerRequest* request, const String& filename, size_t index,
+           uint8_t* data, size_t len, bool final) {
+            if (index == 0) {
+                Serial.printf("[OTA] Begin: %s\n", filename.c_str());
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                    Update.printError(Serial);
+                }
+            }
+            if (Update.isRunning()) {
+                if (Update.write(data, len) != len) {
+                    Update.printError(Serial);
+                }
+            }
+            if (final) {
+                if (Update.end(true)) {
+                    Serial.printf("[OTA] Success: %u bytes\n", index + len);
+                } else {
+                    Update.printError(Serial);
+                }
             }
         }
     );

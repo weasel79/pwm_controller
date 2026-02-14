@@ -5,7 +5,7 @@
 
 struct PotMapping {
     uint8_t adcPin;
-    uint8_t servoChannel;
+    uint8_t outputChannel;
     float   smoothedValue;
     int     lastRawValue;
     bool    active; // True if value is currently changing
@@ -14,26 +14,26 @@ struct PotMapping {
 struct JoystickMapping {
     uint8_t xPin;
     uint8_t yPin;
-    uint8_t servoChannelX;
-    uint8_t servoChannelY;
+    uint8_t outputChannelX;
+    uint8_t outputChannelY;
     float   smoothedX;
     float   smoothedY;
     int     lastRawX;
     int     lastRawY;
 };
 
-class ServoController;
+class OutputController;
 
 class AnalogInput {
 public:
-    void init(ServoController* servoCtrl);
-    void addPot(uint8_t adcPin, uint8_t servoChannel);
-    void addJoystick(uint8_t xPin, uint8_t yPin, uint8_t servoChX, uint8_t servoChY);
+    void init(OutputController* outputCtrl);
+    void addPot(uint8_t adcPin, uint8_t outputChannel);
+    void addJoystick(uint8_t xPin, uint8_t yPin, uint8_t outChX, uint8_t outChY);
     void update();
-    bool isChannelActive(uint8_t servoChannel) const;
+    bool isChannelActive(uint8_t outputChannel) const;
 
 private:
-    ServoController* _servoCtrl = nullptr;
+    OutputController* _outputCtrl = nullptr;
     static const uint8_t MAX_POTS = 8;
     static const uint8_t MAX_JOYSTICKS = 4;
     PotMapping _pots[MAX_POTS];

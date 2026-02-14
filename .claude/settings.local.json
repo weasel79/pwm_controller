@@ -20,7 +20,8 @@
       "Bash(command -v:*)",
       "Bash(ls:*)",
       "Bash(\"/c/Users/Horst/AppData/Local/Programs/Python/Python312/Scripts/pio.exe\" run)",
-      "Bash(\"/c/Users/Horst/AppData/Local/Programs/Python/Python312/Scripts/pio.exe\" device monitor)"
+      "Bash(\"/c/Users/Horst/AppData/Local/Programs/Python/Python312/Scripts/pio.exe\" device monitor)",
+      "Bash(~/.platformio/penv/Scripts/pio run:*)"
     ]
   }
 }

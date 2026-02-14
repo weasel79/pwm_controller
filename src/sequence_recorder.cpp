@@ -1,21 +1,39 @@
 #include "sequence_recorder.h"
-#include "servo_controller.h"
+#include "output_controller.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <new>
 
-void SequenceRecorder::init(ServoController* servoCtrl) {
-    _servoCtrl = servoCtrl;
+void SequenceRecorder::init(OutputController* outputCtrl) {
+    _outputCtrl = outputCtrl;
+    _frameCount = 0;
+    _recording = false;
+    _playing = false;
+    // Buffer allocated on-demand to save ~60KB heap when idle
+    Serial.println("[Seq] Recorder initialized (buffer on-demand)");
+}
+
+bool SequenceRecorder::_allocBuffer() {
+    if (_frames) return true;
     _frames = new(std::nothrow) SequenceFrame[SEQUENCE_MAX_FRAMES];
     if (!_frames) {
         Serial.printf("[Seq] Failed to allocate %d frames, free heap: %lu\n",
                       SEQUENCE_MAX_FRAMES, (unsigned long)ESP.getFreeHeap());
-        Serial.println("[Seq] Recorder disabled");
+        return false;
     }
-    _frameCount = 0;
-    _recording = false;
-    _playing = false;
-    if (_frames) Serial.println("[Seq] Recorder initialized");
+    Serial.printf("[Seq] Allocated %d frames, free heap: %lu\n",
+                  SEQUENCE_MAX_FRAMES, (unsigned long)ESP.getFreeHeap());
+    return true;
+}
+
+void SequenceRecorder::freeBuffer() {
+    if (_recording || _playing) return; // Don't free while in use
+    if (_frames) {
+        delete[] _frames;
+        _frames = nullptr;
+        _frameCount = 0;
+        Serial.printf("[Seq] Buffer freed, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
+    }
 }
 
 void SequenceRecorder::update() {
@@ -30,14 +48,14 @@ void SequenceRecorder::update() {
     }
 
     // Playback: advance frame based on timing
-    if (_playing && _frameCount > 0) {
+    if (_playing && _frameCount > 0 && _frames) {
         unsigned long elapsed = now - _playStartMs;
 
         // Find the frame to play based on elapsed time
         while (_playIndex < _frameCount &&
                _frames[_playIndex].timestampMs <= elapsed) {
-            // Apply this frame's angles
-            _servoCtrl->setAllAngles(_frames[_playIndex].angles, NUM_SERVOS);
+            // Apply this frame's values
+            _outputCtrl->setAllValues(_frames[_playIndex].values, NUM_OUTPUTS);
             _playIndex++;
         }
 
@@ -55,8 +73,8 @@ void SequenceRecorder::update() {
 }
 
 void SequenceRecorder::startRecording() {
-    if (!_frames) return;
     stopPlayback();
+    if (!_allocBuffer()) return;
     _frameCount = 0;
     _recording = true;
     _recStartMs = millis();
@@ -72,6 +90,8 @@ void SequenceRecorder::stopRecording() {
 }
 
 bool SequenceRecorder::loadSequence(const char* name) {
+    if (!_allocBuffer()) return false;
+
     String path = _seqFilePath(name);
     File file = LittleFS.open(path, "r");
     if (!file) {
@@ -94,9 +114,9 @@ bool SequenceRecorder::loadSequence(const char* name) {
     for (JsonObject frame : frames) {
         if (_frameCount >= SEQUENCE_MAX_FRAMES) break;
         _frames[_frameCount].timestampMs = frame["t"] | 0;
-        JsonArray angles = frame["a"];
-        for (uint8_t i = 0; i < NUM_SERVOS; i++) {
-            _frames[_frameCount].angles[i] = (i < angles.size()) ? angles[i].as<uint8_t>() : 90;
+        JsonArray vals = frame["a"];
+        for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
+            _frames[_frameCount].values[i] = (i < vals.size()) ? vals[i].as<uint8_t>() : 90;
         }
         _frameCount++;
     }
@@ -106,7 +126,7 @@ bool SequenceRecorder::loadSequence(const char* name) {
 }
 
 void SequenceRecorder::startPlayback(bool loop) {
-    if (_frameCount == 0) return;
+    if (_frameCount == 0 || !_frames) return;
     stopRecording();
     _playing = true;
     _looping = loop;
@@ -122,7 +142,7 @@ void SequenceRecorder::stopPlayback() {
 }
 
 bool SequenceRecorder::saveSequence(const char* name) {
-    if (_frameCount == 0) {
+    if (_frameCount == 0 || !_frames) {
         Serial.println("[Seq] Nothing to save");
         return false;
     }
@@ -144,9 +164,9 @@ bool SequenceRecorder::saveSequence(const char* name) {
     for (uint16_t i = 0; i < _frameCount; i++) {
         if (i > 0) file.print(",");
         file.printf("{\"t\":%lu,\"a\":[", (unsigned long)_frames[i].timestampMs);
-        for (uint8_t j = 0; j < NUM_SERVOS; j++) {
+        for (uint8_t j = 0; j < NUM_OUTPUTS; j++) {
             if (j > 0) file.print(",");
-            file.print(_frames[i].angles[j]);
+            file.print(_frames[i].values[j]);
         }
         file.print("]}");
     }
@@ -154,6 +174,8 @@ bool SequenceRecorder::saveSequence(const char* name) {
     file.close();
 
     Serial.printf("[Seq] Saved '%s': %d frames\n", name, _frameCount);
+    // Free buffer after save to reclaim memory
+    freeBuffer();
     return true;
 }
 
@@ -191,14 +213,14 @@ String SequenceRecorder::listSequencesJson() {
 }
 
 void SequenceRecorder::_captureFrame() {
-    if (_frameCount >= SEQUENCE_MAX_FRAMES) {
+    if (!_frames || _frameCount >= SEQUENCE_MAX_FRAMES) {
         stopRecording();
         return;
     }
 
     SequenceFrame& f = _frames[_frameCount];
     f.timestampMs = millis() - _recStartMs;
-    _servoCtrl->getAllAngles(f.angles, NUM_SERVOS);
+    _outputCtrl->getAllValues(f.values, NUM_OUTPUTS);
     _frameCount++;
 }
 
