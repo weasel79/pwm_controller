@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show:*)",
+      "Bash(py:*)",
+      "Bash(grep:*)",
+      "Bash(winget install:*)",
+      "Bash(export PATH=\"/c/Users/Horst/.local/bin:/c/Users/Horst/AppData/Local/Programs/Python/Python312:/c/Users/Horst/AppData/Local/Programs/Python/Python312/Scripts:$PATH\")",
+      "Bash(uv:*)",
+      "Bash(cmd.exe /c \"where uv\":*)",
+      "Bash(cmd.exe /c \"echo %PATH%\")",
+      "Bash(tr:*)",
+      "Bash(powershell.exe -Command \"Get-ChildItem -Path ''C:\\\\Users\\\\Horst'' -Filter ''uv.exe'' -Recurse -Depth 5 -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem -Path ''C:\\\\'' -Filter ''uv.exe'' -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName\")",
+      "Bash(export PATH:*)",
+      "Bash(~/.platformio/packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-addr2line:*)",
+      "Bash(pio run)",
+      "Bash(timeout 30 pio device monitor:*)",
+      "Bash(command -v python:*)",
+      "Bash(command -v:*)",
+      "Bash(ls:*)",
+      "Bash(\"/c/Users/Horst/AppData/Local/Programs/Python/Python312/Scripts/pio.exe\" run)",
+      "Bash(\"/c/Users/Horst/AppData/Local/Programs/Python/Python312/Scripts/pio.exe\" device monitor)"
+    ]
+  }
+}
