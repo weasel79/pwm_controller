@@ -23,14 +23,8 @@
 
 // ---- Analog Input Pins (ADC1 only - ADC2 conflicts with WiFi) ----
 // Potentiometer pins (connect wiper to pin, ends to 3.3V and GND)
-#define POT_PIN_0       34
-#define POT_PIN_1       35
-#define POT_PIN_2       32
-#define POT_PIN_3       33
-
-// Joystick pins
-#define JOY1_X_PIN      36
-#define JOY1_Y_PIN      39
+#define NUM_POTS        4
+static const uint8_t POT_PINS[NUM_POTS] = {34, 35, 32, 33};
 
 // ---- Analog Input Settings ----
 #define ADC_RESOLUTION      12          // 12-bit ADC (0-4095)
@@ -38,10 +32,8 @@
 #define ANALOG_SMOOTHING    0.15f       // EMA alpha (0.0 = no change, 1.0 = no smoothing)
 #define ANALOG_UPDATE_MS    20          // Read interval in ms
 
-// ---- Sequence Recorder ----
-#define SEQUENCE_DIR        "/sequences"
-#define SEQUENCE_FRAME_MS   50          // Capture interval (20 fps)
-#define SEQUENCE_MAX_FRAMES 3000        // Max frames per sequence (~2.5 min at 20fps)
+// ---- Sequence Data (per-channel) ----
+#define SEQDATA_DIR         "/seqdata"
 
 // ---- PS4 Controller ----
 // MAC address for Bluetooth pairing (set controller to match via SixAxis Pair Tool)
