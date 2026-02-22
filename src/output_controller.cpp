@@ -13,7 +13,7 @@ static const char* _inputSourceName(InputSource s) {
         case INPUT_PS4_CIRCLE: return "ps4_circle"; case INPUT_PS4_SQUARE: return "ps4_square";
         case INPUT_PS4_TRIANGLE: return "ps4_tri"; case INPUT_PS4_L1: return "ps4_l1";
         case INPUT_PS4_R1: return "ps4_r1"; case INPUT_SEQUENCE: return "sequence";
-        default: return "?";
+        case INPUT_DIGITAL: return "digital"; default: return "?";
     }
 }
 
@@ -26,13 +26,15 @@ void OutputController::init() {
     for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
         _channels[i].channel = i;
         _channels[i].type = OUTPUT_SERVO;
-        _channels[i].minUs = OUTPUT_DEFAULT_MIN_US;
-        _channels[i].maxUs = OUTPUT_DEFAULT_MAX_US;
+        _channels[i].pwmMin = SERVO_DEFAULT_PWM_MIN;
+        _channels[i].pwmMax = SERVO_DEFAULT_PWM_MAX;
         _channels[i].currentValue = (float)OUTPUT_DEFAULT_VALUE;
         _channels[i].targetValue = (float)OUTPUT_DEFAULT_VALUE;
         _channels[i].enabled = true;
         _channels[i].inputSource = INPUT_MANUAL;
         _channels[i].potIndex = 0;
+        _channels[i].digitalPin = 0;
+        _channels[i].digitalMode = 0;
         _channels[i].curveData = nullptr;
         _channels[i].curveLen = 0;
         _channels[i].curvePlaying = false;
@@ -94,10 +96,10 @@ const OutputChannel& OutputController::getChannel(uint8_t ch) const {
     return _channels[ch < NUM_OUTPUTS ? ch : 0];
 }
 
-void OutputController::setChannelRange(uint8_t channel, uint16_t minUs, uint16_t maxUs) {
+void OutputController::setChannelRange(uint8_t channel, uint16_t pwmMin, uint16_t pwmMax) {
     if (channel >= NUM_OUTPUTS) return;
-    _channels[channel].minUs = minUs;
-    _channels[channel].maxUs = maxUs;
+    _channels[channel].pwmMin = pwmMin;
+    _channels[channel].pwmMax = pwmMax;
 }
 
 void OutputController::setChannelName(uint8_t channel, const char* name) {
@@ -109,6 +111,13 @@ void OutputController::setChannelName(uint8_t channel, const char* name) {
 void OutputController::setChannelType(uint8_t channel, OutputType type) {
     if (channel >= NUM_OUTPUTS) return;
     _channels[channel].type = type;
+    if (type == OUTPUT_SERVO) {
+        _channels[channel].pwmMin = SERVO_DEFAULT_PWM_MIN;
+        _channels[channel].pwmMax = SERVO_DEFAULT_PWM_MAX;
+    } else {
+        _channels[channel].pwmMin = MOTOR_DEFAULT_PWM_MIN;
+        _channels[channel].pwmMax = MOTOR_DEFAULT_PWM_MAX;
+    }
     _updateFrequency();
 }
 
@@ -118,6 +127,13 @@ void OutputController::setChannelInput(uint8_t channel, InputSource src) {
     InputSource old = _channels[channel].inputSource;
 #endif
     _channels[channel].inputSource = src;
+    // Stop any active curve so it doesn't override the new input source
+    if (_channels[channel].curvePlaying) {
+        _channels[channel].curvePlaying = false;
+#if LOG_LEVEL >= 1
+        Serial.printf("[Curve] ch%d: stopped (input changed)\n", channel);
+#endif
+    }
 #if LOG_LEVEL >= 1
     Serial.printf("[%lu] API -> ch%d: input %s -> %s\n",
                   millis(), channel, _inputSourceName(old), _inputSourceName(src));
@@ -221,14 +237,15 @@ void OutputController::getPresetJson(String& out) const {
             case OUTPUT_MOTOR:    obj["type"] = "motor";   break;
             case OUTPUT_LEGO:     obj["type"] = "lego";    break;
             case OUTPUT_PWM:      obj["type"] = "pwm";     break;
-            case OUTPUT_MOTOR_1K: obj["type"] = "motor1k"; break;
         }
         obj["input"] = _inputSourceName(ch.inputSource);
         obj["value"] = (int)roundf(ch.currentValue);
         obj["name"] = ch.name;
-        obj["min"] = ch.minUs;
-        obj["max"] = ch.maxUs;
+        obj["pwmMin"] = ch.pwmMin;
+        obj["pwmMax"] = ch.pwmMax;
         obj["pot"] = ch.potIndex;
+        obj["digPin"] = ch.digitalPin;
+        obj["digMode"] = ch.digitalMode;
     }
     serializeJson(doc, out);
 }
@@ -249,7 +266,6 @@ bool OutputController::applyPresetJson(const uint8_t* data, size_t len) {
         else if (strcmp(typeStr, "motor") == 0) setChannelType(i, OUTPUT_MOTOR);
         else if (strcmp(typeStr, "lego") == 0) setChannelType(i, OUTPUT_LEGO);
         else if (strcmp(typeStr, "pwm") == 0) setChannelType(i, OUTPUT_PWM);
-        else if (strcmp(typeStr, "motor1k") == 0) setChannelType(i, OUTPUT_MOTOR_1K);
 
         // Input source
         const char* inStr = obj["input"] | "manual";
@@ -269,61 +285,60 @@ bool OutputController::applyPresetJson(const uint8_t* data, size_t len) {
         else if (strcmp(inStr, "ps4_l1") == 0) setChannelInput(i, INPUT_PS4_L1);
         else if (strcmp(inStr, "ps4_r1") == 0) setChannelInput(i, INPUT_PS4_R1);
         else if (strcmp(inStr, "sequence") == 0) setChannelInput(i, INPUT_SEQUENCE);
+        else if (strcmp(inStr, "digital") == 0) setChannelInput(i, INPUT_DIGITAL);
 
         // Value, name, range, pot
         setValue(i, (float)(obj["value"] | 90));
         if (obj["name"]) setChannelName(i, obj["name"]);
-        if (obj["min"].is<uint16_t>() && obj["max"].is<uint16_t>()) {
-            setChannelRange(i, obj["min"] | OUTPUT_DEFAULT_MIN_US, obj["max"] | OUTPUT_DEFAULT_MAX_US);
+        if (obj.containsKey("pwmMin") && obj.containsKey("pwmMax")) {
+            setChannelRange(i, obj["pwmMin"] | SERVO_DEFAULT_PWM_MIN, obj["pwmMax"] | SERVO_DEFAULT_PWM_MAX);
+        } else if (obj.containsKey("min") && obj.containsKey("max")) {
+            // Backward compat: convert old microsecond values to ticks
+            uint16_t minUs = obj["min"] | OUTPUT_DEFAULT_MIN_US;
+            uint16_t maxUs = obj["max"] | OUTPUT_DEFAULT_MAX_US;
+            setChannelRange(i, (uint16_t)(minUs * 4096UL / 20000), (uint16_t)(maxUs * 4096UL / 20000));
         }
         setChannelPot(i, obj["pot"] | 0);
+        _channels[i].digitalPin = obj["digPin"] | 0;
+        _channels[i].digitalMode = obj["digMode"] | 0;
         i++;
     }
     return true;
 }
 
 void OutputController::_writePWM(uint8_t channel, float value) {
-    uint16_t ticks;
-
-    switch (_channels[channel].type) {
-        case OUTPUT_SERVO: {
-            float us = _servoValueToPulse(channel, value);
-            float periodUs = 1000000.0f / _currentFreqHz;
-            ticks = (uint16_t)(us * 4096.0f / periodUs);
-            break;
-        }
-        case OUTPUT_MOTOR:
-        case OUTPUT_LEGO:
-        case OUTPUT_PWM:
-        case OUTPUT_MOTOR_1K: {
-            ticks = (uint16_t)(value * 4095.0f / 180.0f);
-            break;
-        }
-    }
-
-    _pca.setPWM(channel, 0, ticks);
+    const auto& ch = _channels[channel];
+    float frac = constrain(value, 0.0f, 180.0f) / 180.0f;
+    // Unified: ticks = pwmMin + frac * (pwmMax - pwmMin)
+    // Supports inversion when pwmMin > pwmMax
+    float ticks = ch.pwmMin + frac * ((float)ch.pwmMax - (float)ch.pwmMin);
+    uint16_t t = constrain((uint16_t)roundf(ticks), (uint16_t)0, (uint16_t)4095);
+    _pca.setPWM(channel, 0, t);
 }
 
-void OutputController::_updateFrequency() {
-    bool hasServo = false;
-    bool has1k = false;
+void OutputController::stopAllCurves() {
     for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
-        if (_channels[i].type == OUTPUT_SERVO) hasServo = true;
-        if (_channels[i].type == OUTPUT_MOTOR_1K) has1k = true;
+        _channels[i].curvePlaying = false;
     }
+#if LOG_LEVEL >= 1
+    Serial.println("[Output] All curves stopped");
+#endif
+}
 
-    uint16_t targetFreq = (has1k && !hasServo) ? 1000 : OUTPUT_FREQ_HZ;
-
-    if (targetFreq != _currentFreqHz) {
-        _currentFreqHz = targetFreq;
+void OutputController::setGlobalFrequency(uint16_t freqHz) {
+    freqHz = constrain(freqHz, (uint16_t)24, (uint16_t)1526);
+    if (freqHz != _currentFreqHz) {
+        _currentFreqHz = freqHz;
         _pca.setPWMFreq(_currentFreqHz);
-        Serial.printf("[Output] PWM frequency changed to %d Hz\n", _currentFreqHz);
+        Serial.printf("[Output] PWM frequency set to %d Hz\n", _currentFreqHz);
+        // Rewrite all outputs at new frequency
         for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
             _writePWM(i, _channels[i].currentValue);
         }
     }
 }
 
-float OutputController::_servoValueToPulse(uint8_t channel, float value) const {
-    return _channels[channel].minUs + (value / 180.0f) * (_channels[channel].maxUs - _channels[channel].minUs);
+void OutputController::_updateFrequency() {
+    // Kept for API compat — frequency is now set via setGlobalFrequency()
 }
+

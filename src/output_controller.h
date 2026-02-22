@@ -21,14 +21,14 @@ enum InputSource : uint8_t {
     INPUT_PS4_L1     = 13,
     INPUT_PS4_R1     = 14,
     INPUT_SEQUENCE   = 15,
+    INPUT_DIGITAL    = 16,
 };
 
 enum OutputType : uint8_t {
     OUTPUT_SERVO = 0,   // Standard servo: 500-2500us pulse, 0-180 = angle
     OUTPUT_MOTOR = 1,   // DC motor: full PWM duty cycle, 0-180 = speed %
     OUTPUT_LEGO  = 2,   // Lego motor: full PWM duty cycle, 0-180 = speed %
-    OUTPUT_PWM      = 3,   // Raw PWM: full duty cycle, 0-180 = 0-100%
-    OUTPUT_MOTOR_1K = 4    // DC motor @ 1kHz: full duty cycle, 0-180 = speed %
+    OUTPUT_PWM      = 3    // Raw PWM: full duty cycle, 0-180 = 0-100%
 };
 
 struct CurvePoint {
@@ -39,14 +39,16 @@ struct CurvePoint {
 struct OutputChannel {
     uint8_t    channel;
     OutputType type;
-    uint16_t   minUs;
-    uint16_t   maxUs;
+    uint16_t   pwmMin;
+    uint16_t   pwmMax;
     float      currentValue;
     float      targetValue;
     char       name[16];
     bool       enabled;
     InputSource inputSource;
     uint8_t    potIndex;       // Which physical pot (0..NUM_POTS-1) when input=pot
+    uint8_t    digitalPin;    // Which digital pin index (0..NUM_POTS-1) when input=digital
+    uint8_t    digitalMode;   // 0=toggle, 1=latch
     // Curve playback (envelope / sequence)
     CurvePoint* curveData = nullptr;
     uint16_t   curveLen = 0;
@@ -64,7 +66,7 @@ public:
     void setAllValues(const uint8_t values[], uint8_t count);
     void getAllValues(uint8_t outValues[], uint8_t count) const;
     const OutputChannel& getChannel(uint8_t ch) const;
-    void setChannelRange(uint8_t channel, uint16_t minUs, uint16_t maxUs);
+    void setChannelRange(uint8_t channel, uint16_t pwmMin, uint16_t pwmMax);
     void setChannelName(uint8_t channel, const char* name);
     void setChannelType(uint8_t channel, OutputType type);
     void setChannelInput(uint8_t channel, InputSource src);
@@ -75,6 +77,11 @@ public:
     // Curve playback (used for envelope and sequence on ESP side)
     void playCurve(uint8_t channel, const CurvePoint* points, uint16_t count, float duration, bool loop);
     void stopCurve(uint8_t channel);
+    void stopAllCurves();
+
+    // Global PWM frequency
+    void setGlobalFrequency(uint16_t freqHz);
+    uint16_t getGlobalFrequency() const { return _currentFreqHz; }
 
     // Preset save/load
     void getPresetJson(String& out) const;
@@ -87,6 +94,5 @@ private:
     uint16_t _currentFreqHz = OUTPUT_FREQ_HZ;
     void _writePWM(uint8_t channel, float value);
     void _updateFrequency();
-    float _servoValueToPulse(uint8_t channel, float value) const;
     float _interpolateCurve(uint8_t channel, float t) const;
 };

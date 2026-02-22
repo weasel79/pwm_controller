@@ -6,7 +6,7 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Output Controller</title>
+<title>Universal PWM Control</title>
 <style>
   :root { --accent: #e94560; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -29,7 +29,7 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
   }
   .output-card .name { font-weight: 600; font-size: 14px; }
   .output-card .angle {
-    font-size: 20px; font-weight: 700; color: var(--accent);
+    font-size: 20px; font-weight: 700; color: var(--ch-color, var(--accent));
     min-width: 42px; text-align: right;
   }
   .output-card input[type=range] {
@@ -38,7 +38,7 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
   }
   .output-card input[type=range]::-webkit-slider-thumb {
     -webkit-appearance: none; width: 20px; height: 20px;
-    background: var(--accent); border-radius: 50%; cursor: pointer;
+    background: var(--ch-color, var(--accent)); border-radius: 50%; cursor: pointer;
   }
   .output-card select {
     background: #0f3460; color: #eee; border: 1px solid #1a3a5c;
@@ -117,6 +117,12 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
   }
   .pot-panel label { font-size: 12px; color: #aaa; }
   .ext-slider input[type=range] { opacity: 0.4; pointer-events: none; }
+  .card-title { text-align:center; font-weight:700; font-size:14px; color:var(--ch-color,var(--accent)); margin-bottom:6px; }
+  .ctrl-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:11px; }
+  .ps4-sub { display:none; }
+  .pwm-row { display:flex; align-items:center; gap:4px; font-size:11px; color:#888; margin-bottom:6px; }
+  .pwm-row input[type=number] { width:50px; background:#0f3460; color:#eee; border:1px solid #1a3a5c; border-radius:4px; padding:2px 4px; font-size:11px; text-align:center; }
+  .panel-sep { border-top:1px solid #0f3460; margin:6px 0; }
   .ota-section {
     max-width: 1200px; margin: 16px auto;
     background: #16213e; border-radius: 8px; padding: 12px;
@@ -142,9 +148,16 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
 </style>
 </head>
 <body>
-<h1>Output Controller</h1>
+<h1>Universal PWM Control</h1>
 <div id="status">Connecting...</div>
 <div class="grid" id="outputs"></div>
+<div class="section" id="globalSection">
+  <h3>Global</h3>
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+    <label style="font-size:13px;">PWM Frequency: <input type="number" id="globalFreq" min="24" max="1526" value="50" onchange="setGlobalFreq()" style="width:60px;background:#0f3460;color:#eee;border:1px solid #1a3a5c;border-radius:4px;padding:2px 4px;font-size:13px;text-align:center;"> Hz</label>
+    <button class="btn-rec" onclick="stopAll()">Stop All</button>
+  </div>
+</div>
 <div class="section">
   <h3>Presets</h3>
   <div style="display:flex;gap:8px;margin-bottom:8px;">
@@ -162,10 +175,21 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
   <div id="otaProgress"><div class="bar" id="otaBar" style="width:0%"></div></div>
 </div>
 <script>
-// Random accent color on each load
-var accentHue = Math.floor(Math.random() * 360);
-var accentColor = 'hsl(' + accentHue + ',75%,55%)';
+// Per-channel rainbow colors
+function channelColor(ch) { return 'hsl(' + Math.round(ch * 340 / 15) + ',75%,55%)'; }
+var accentColor = 'hsl(0,75%,55%)';
 document.documentElement.style.setProperty('--accent', accentColor);
+
+// Envelope speed steps: straight, triplet (T), dotted (.) multiples
+var envSpeedSteps = [
+  {v:16, l:'16x'}, {v:8, l:'8x'},
+  {v:6, l:'4T'}, {v:16/3, l:'8.'}, {v:4, l:'4x'},
+  {v:3, l:'2T'}, {v:8/3, l:'4.'}, {v:2, l:'2x'},
+  {v:1.5, l:'1T'}, {v:4/3, l:'2.'}, {v:1, l:'1x'},
+  {v:0.75, l:'1/2T'}, {v:2/3, l:'1.'}, {v:0.5, l:'1/2x'},
+  {v:1/3, l:'1/2.'}, {v:0.25, l:'1/4x'},
+  {v:0.125, l:'1/8x'}, {v:1/16, l:'1/16x'}
+];
 
 const NUM = 16;
 const POT_PINS = [34, 35, 32, 33];
@@ -180,7 +204,9 @@ for (let i = 0; i < NUM; i++) {
     duration: 2.0, loop: false, playing: false,
     timer: null, startTime: 0,
     dragging: -1, canvasReady: false,
-    rafId: null, sendTimer: null
+    rafId: null, sendTimer: null,
+    speed: 1.0, quantize: false,
+    controlInput: '', controlPollTimer: null, lastControlVal: false
   });
 }
 let sequences = [];
@@ -195,10 +221,56 @@ for (let i = 0; i < NUM; i++) {
 }
 
 function formatValue(ch, val) {
-  if (types[ch] === 'motor' || types[ch] === 'lego' || types[ch] === 'pwm' || types[ch] === 'motor1k') {
+  if (types[ch] === 'motor' || types[ch] === 'lego' || types[ch] === 'pwm') {
     return Math.round(val * 100 / 180) + '%';
   }
   return val + '\u00B0';
+}
+
+// Map raw input values to 0-180 angle
+function mapControlInput(recInput, raw) {
+  if (recInput.startsWith('pot_')) {
+    var pi = parseInt(recInput.charAt(4));
+    if (raw.analog && raw.analog[pi] !== undefined) {
+      return Math.round(raw.analog[pi] * 180 / 4095);
+    }
+  } else if (recInput.startsWith('ps4_')) {
+    if (!raw.ps4) return null;
+    var key = recInput.substring(4);
+    var v = raw.ps4[key];
+    if (v === undefined) return null;
+    if (typeof v === 'boolean') return v ? 180 : 0;
+    if (key === 'lx' || key === 'ly' || key === 'rx' || key === 'ry') {
+      return Math.round((v + 128) * 180 / 255);
+    }
+    if (key === 'l2' || key === 'r2') {
+      return Math.round(v * 180 / 255);
+    }
+  } else if (recInput.startsWith('dig_')) {
+    var pi = parseInt(recInput.charAt(4));
+    if (raw.digital && raw.digital[pi] !== undefined) {
+      return raw.digital[pi] ? 180 : 0;
+    }
+  }
+  return null;
+}
+
+// Format a raw input value for display
+function formatRawInput(src, potIdx, digPin, raw) {
+  if (!raw) return '';
+  if (src === 'pot') {
+    return raw.analog ? String(raw.analog[potIdx]) : '';
+  } else if (src.startsWith('ps4_')) {
+    if (!raw.ps4 || !raw.ps4.connected) return 'N/C';
+    var key = src.substring(4);
+    var v = raw.ps4[key];
+    if (v === undefined) return '';
+    if (typeof v === 'boolean') return v ? 'ON' : 'OFF';
+    return String(v);
+  } else if (src === 'digital') {
+    return raw.digital ? (raw.digital[digPin] ? 'HIGH' : 'LOW') : '';
+  }
+  return '';
 }
 
 function init() {
@@ -207,59 +279,86 @@ function init() {
     const card = document.createElement('div');
     card.className = 'output-card';
     card.id = 'card' + i;
+    card.style.setProperty('--ch-color', channelColor(i));
     card.innerHTML = `
-      <div class="header">
-        <span class="name" id="name${i}">Output ${i}</span>
-        <span style="display:flex;align-items:center;">
-          <select id="type${i}" onchange="onTypeChange(${i}, this.value)">
-            <option value="servo">Servo</option>
-            <option value="motor">Motor</option>
-            <option value="lego">Lego</option>
-            <option value="pwm">PWM</option>
-            <option value="motor1k">Motor 1kHz</option>
-          </select>
-          <span class="angle" id="val${i}">90</span>
-        </span>
-      </div>
-      <div class="input-row">
-        <label>Input:</label>
-        <select id="in${i}" onchange="onInputChange(${i}, this.value)">
+      <div class="card-title">Output ${i}</div>
+      <div class="ctrl-row">
+        <select id="in${i}" onchange="onInputChange(${i},this.value)">
           <option value="manual">Manual</option>
           <option value="envelope">Envelope</option>
           <option value="sequence">Sequence</option>
-          <option value="pot">Pot</option>
-          <option value="ps4_lx">PS4 L-Stick X</option>
-          <option value="ps4_ly">PS4 L-Stick Y</option>
-          <option value="ps4_rx">PS4 R-Stick X</option>
-          <option value="ps4_ry">PS4 R-Stick Y</option>
-          <option value="ps4_l2">PS4 L2</option>
-          <option value="ps4_r2">PS4 R2</option>
-          <option value="ps4_cross">Cross</option>
-          <option value="ps4_circle">Circle</option>
-          <option value="ps4_square">Square</option>
-          <option value="ps4_triangle">Triangle</option>
-          <option value="ps4_l1">PS4 L1</option>
-          <option value="ps4_r1">PS4 R1</option>
+          <option value="pot">Analog I/O</option>
+          <option value="ps4">PS4 Controller</option>
+          <option value="digital">Digital I/O</option>
         </select>
+        <select id="ps4sub${i}" class="ps4-sub" onchange="onPS4SubChange(${i},this.value)">
+          <option value="ps4_lx">L-Stick X</option><option value="ps4_ly">L-Stick Y</option>
+          <option value="ps4_rx">R-Stick X</option><option value="ps4_ry">R-Stick Y</option>
+          <option value="ps4_l2">L2</option><option value="ps4_r2">R2</option>
+          <option value="ps4_l1">L1</option><option value="ps4_r1">R1</option>
+          <option value="ps4_cross">Cross</option><option value="ps4_circle">Circle</option>
+          <option value="ps4_square">Square</option><option value="ps4_triangle">Triangle</option>
+        </select>
+        <span id="rawVal${i}" style="font-size:10px;color:#666;font-family:monospace;"></span>
+        <span style="flex:1"></span>
+        <select id="type${i}" onchange="onTypeChange(${i},this.value)">
+          <option value="servo">Servo</option><option value="motor">Motor</option>
+          <option value="lego">Lego</option><option value="pwm">PWM</option>
+        </select>
+        <span class="angle" id="val${i}">90</span>
       </div>
+      <div class="pwm-row">
+        <span>PWM</span>
+        <input type="number" id="pwmMin${i}" min="0" max="4095" value="102" onchange="onPwmRange(${i})">
+        <span>-</span>
+        <input type="number" id="pwmMax${i}" min="0" max="4095" value="512" onchange="onPwmRange(${i})">
+      </div>
+      <div class="panel-sep"></div>
       <div class="input-panel show" id="panelManual${i}">
-        <input type="range" min="0" max="180" value="90" id="sl${i}"
-          oninput="onSlider(${i}, this.value)">
+        <input type="range" min="0" max="180" value="90" id="sl${i}" oninput="onSlider(${i},this.value)">
       </div>
       <div class="input-panel pot-panel" id="panelPot${i}">
-        <label>Pot: <select id="pot${i}" onchange="onPotChange(${i}, this.value)">
-          ${POT_PINS.map((p, pi) => '<option value="'+pi+'">Pot '+pi+' (GPIO'+p+')</option>').join('')}
+        <label>Analog: <select id="pot${i}" onchange="onPotChange(${i},this.value)">
+          ${POT_PINS.map((p,pi)=>'<option value="'+pi+'">Analog '+pi+' (GPIO'+p+')</option>').join('')}
         </select></label>
+      </div>
+      <div class="input-panel" id="panelDigital${i}">
+        <div style="display:flex;gap:8px;align-items:center;font-size:12px;">
+          <label>Pin: <select id="digPin${i}" onchange="onDigitalConfig(${i})">
+            ${POT_PINS.map((p,pi)=>'<option value="'+pi+'">Analog '+pi+' (GPIO'+p+')</option>').join('')}
+          </select></label>
+          <label>Mode: <select id="digMode${i}" onchange="onDigitalConfig(${i})">
+            <option value="0">Toggle</option><option value="1">Latch</option>
+          </select></label>
+        </div>
       </div>
       <div class="input-panel envelope-panel" id="panelEnv${i}">
         <canvas class="env-canvas" id="envCanvas${i}"></canvas>
         <div class="env-controls">
-          <button class="btn-env-play" id="envPlayBtn${i}" onclick="envTogglePlay(${i})">Play</button>
-          <label>Dur: <input type="range" min="0.5" max="30" step="0.5" value="2"
-            oninput="envSetDuration(${i}, this.value)"> <span id="envDur${i}">2.0s</span></label>
-          <label><input type="checkbox" onchange="envSetLoop(${i}, this.checked)"> Loop</label>
+          <label>Control: <select id="envCtrlIn${i}" style="max-width:100px;" onchange="envSetCtrlInput(${i},this.value)">
+            <option value="">None</option>
+            <option value="dig_0">Digital 0</option><option value="dig_1">Digital 1</option>
+            <option value="dig_2">Digital 2</option><option value="dig_3">Digital 3</option>
+            <option value="ps4_cross">Cross</option><option value="ps4_circle">Circle</option>
+            <option value="ps4_square">Square</option><option value="ps4_triangle">Tri</option>
+            <option value="ps4_l1">L1</option><option value="ps4_r1">R1</option>
+          </select></label>
+          <span style="flex:1"></span>
+          <button onclick="envClear(${i})" class="seq-play" style="font-size:11px;padding:3px 8px;">Clear</button>
         </div>
-        <div class="env-controls" style="margin-top:4px;">
+        <div class="env-controls">
+          <button class="btn-env-play" id="envPlayBtn${i}" onclick="envTogglePlay(${i})">Play</button>
+          <label><input type="checkbox" id="envLoop${i}" onchange="envSetLoop(${i},this.checked)"> Loop</label>
+          <label><input type="checkbox" id="envQuant${i}" onchange="envSetQuantize(${i},this.checked)"> Quantize</label>
+          <label style="margin-left:auto;">Dur: <input type="range" min="0.5" max="30" step="0.5" value="2"
+            oninput="envSetDuration(${i},this.value)" style="width:60px"> <span id="envDur${i}">2.0s</span></label>
+        </div>
+        <div class="env-controls">
+          <input type="range" id="envSpeed${i}" min="0" max="17" step="1" value="10"
+            oninput="envSetSpeed(${i},this.value)" style="flex:1">
+          <span id="envSpeedVal${i}" style="min-width:36px;text-align:right;">1x</span>
+        </div>
+        <div class="env-controls">
           <button class="btn-save" onclick="envSaveCh(${i})" style="font-size:11px;padding:3px 8px;">Save</button>
           <select id="envSel${i}"><option value="">-- saved --</option></select>
           <button class="seq-play" onclick="envLoadCh(${i})" style="font-size:11px;padding:3px 8px;">Load</button>
@@ -270,38 +369,36 @@ function init() {
         <input type="range" min="0" max="180" value="90" id="extSl${i}" disabled>
       </div>
       <div class="input-panel seq-panel" id="panelSeq${i}">
-        <input type="range" min="0" max="180" value="90" id="seqSl${i}"
-          oninput="onSlider(${i}, this.value)">
+        <input type="range" min="0" max="180" value="90" id="seqSl${i}" oninput="onSlider(${i},this.value)">
         <canvas class="env-canvas" id="seqCanvas${i}" style="margin-top:6px;cursor:default;"></canvas>
         <div class="env-controls">
           <button class="btn-rec" id="seqRecBtn${i}" onclick="seqToggleRec(${i})">Rec</button>
-          <button class="btn-env-play" id="seqPlayBtn${i}" onclick="seqTogglePlay(${i})">Play</button>
-          <label><input type="checkbox" id="seqLoop${i}" onchange="seqSetLoop(${i}, this.checked)"> Loop</label>
-          <label>Speed: <input type="range" min="25" max="400" step="25" value="100"
-            id="seqSpeed${i}" oninput="seqSetSpeed(${i}, this.value)"> <span id="seqSpeedVal${i}">1.0x</span></label>
-        </div>
-        <div class="env-controls" style="margin-top:4px;">
-          <label>Rec from: <select id="seqIn${i}">
+          <label>Control: <select id="seqIn${i}" style="max-width:100px;">
             <option value="manual">Slider</option>
-            <option value="pot_0">Pot 0</option>
-            <option value="pot_1">Pot 1</option>
-            <option value="pot_2">Pot 2</option>
-            <option value="pot_3">Pot 3</option>
-            <option value="ps4_lx">PS4 LX</option>
-            <option value="ps4_ly">PS4 LY</option>
-            <option value="ps4_rx">PS4 RX</option>
-            <option value="ps4_ry">PS4 RY</option>
-            <option value="ps4_l2">PS4 L2</option>
-            <option value="ps4_r2">PS4 R2</option>
-            <option value="ps4_cross">Cross</option>
-            <option value="ps4_circle">Circle</option>
-            <option value="ps4_square">Square</option>
-            <option value="ps4_triangle">Tri</option>
-            <option value="ps4_l1">PS4 L1</option>
-            <option value="ps4_r1">PS4 R1</option>
+            <option value="pot_0">Analog 0</option><option value="pot_1">Analog 1</option>
+            <option value="pot_2">Analog 2</option><option value="pot_3">Analog 3</option>
+            <option value="dig_0">Digital 0</option><option value="dig_1">Digital 1</option>
+            <option value="dig_2">Digital 2</option><option value="dig_3">Digital 3</option>
+            <option value="ps4_lx">PS4 LX</option><option value="ps4_ly">PS4 LY</option>
+            <option value="ps4_rx">PS4 RX</option><option value="ps4_ry">PS4 RY</option>
+            <option value="ps4_l2">PS4 L2</option><option value="ps4_r2">PS4 R2</option>
+            <option value="ps4_cross">Cross</option><option value="ps4_circle">Circle</option>
+            <option value="ps4_square">Square</option><option value="ps4_triangle">Tri</option>
+            <option value="ps4_l1">PS4 L1</option><option value="ps4_r1">PS4 R1</option>
           </select></label>
+          <span style="flex:1"></span>
+          <button onclick="seqClear(${i})" class="seq-play" style="font-size:11px;padding:3px 8px;">Clear</button>
         </div>
-        <div class="env-controls" style="margin-top:4px;">
+        <div class="env-controls">
+          <button class="btn-env-play" id="seqPlayBtn${i}" onclick="seqTogglePlay(${i})">Play</button>
+          <label><input type="checkbox" id="seqLoop${i}" onchange="seqSetLoop(${i},this.checked)"> Loop</label>
+        </div>
+        <div class="env-controls">
+          <input type="range" id="seqSpeed${i}" min="1" max="100" step="1" value="10"
+            oninput="seqSetSpeed(${i},this.value)" style="flex:1">
+          <span id="seqSpeedVal${i}" style="min-width:36px;text-align:right;">1.0x</span>
+        </div>
+        <div class="env-controls">
           <button class="btn-save" onclick="seqSaveCh(${i})" style="font-size:11px;padding:3px 8px;">Save</button>
           <select id="seqSel${i}"><option value="">-- saved --</option></select>
           <button class="seq-play" onclick="seqLoadCh(${i})" style="font-size:11px;padding:3px 8px;">Load</button>
@@ -319,17 +416,24 @@ function init() {
 
 function updateCardUI(ch) {
   var src = inputs[ch];
-  document.getElementById('panelManual' + ch).classList.remove('show');
-  document.getElementById('panelPot' + ch).classList.remove('show');
-  document.getElementById('panelEnv' + ch).classList.remove('show');
-  document.getElementById('panelExt' + ch).classList.remove('show');
-  document.getElementById('panelSeq' + ch).classList.remove('show');
-
+  var card = document.getElementById('card' + ch);
+  card.querySelectorAll('.input-panel').forEach(function(p) { p.classList.remove('show'); });
+  // Set main dropdown value (group PS4)
+  if (src.startsWith('ps4_')) {
+    document.getElementById('in' + ch).value = 'ps4';
+    document.getElementById('ps4sub' + ch).style.display = 'inline-block';
+    document.getElementById('ps4sub' + ch).value = src;
+  } else {
+    document.getElementById('in' + ch).value = src;
+    document.getElementById('ps4sub' + ch).style.display = 'none';
+  }
   if (src === 'manual') {
     document.getElementById('panelManual' + ch).classList.add('show');
   } else if (src === 'pot') {
     document.getElementById('panelPot' + ch).classList.add('show');
     document.getElementById('pot' + ch).value = pots[ch];
+    document.getElementById('panelExt' + ch).classList.add('show');
+    document.getElementById('extSl' + ch).value = angles[ch];
   } else if (src === 'envelope') {
     document.getElementById('panelEnv' + ch).classList.add('show');
     var env = envelopes[ch];
@@ -340,6 +444,10 @@ function updateCardUI(ch) {
     document.getElementById('panelSeq' + ch).classList.add('show');
     document.getElementById('seqSl' + ch).value = angles[ch];
     drawSequence(ch);
+  } else if (src === 'digital') {
+    document.getElementById('panelDigital' + ch).classList.add('show');
+    document.getElementById('panelExt' + ch).classList.add('show');
+    document.getElementById('extSl' + ch).value = angles[ch];
   } else {
     // PS4 or other external input
     document.getElementById('panelExt' + ch).classList.add('show');
@@ -364,14 +472,21 @@ function fetchState() {
           if (s.name) document.getElementById('name' + i).textContent = s.name;
           if (s.input) {
             inputs[i] = s.input;
-            document.getElementById('in' + i).value = s.input;
           }
           if (s.pot !== undefined) pots[i] = s.pot;
+          if (s.pwmMin !== undefined) document.getElementById('pwmMin' + i).value = s.pwmMin;
+          if (s.pwmMax !== undefined) document.getElementById('pwmMax' + i).value = s.pwmMax;
+          if (s.digPin !== undefined) document.getElementById('digPin' + i).value = s.digPin;
+          if (s.digMode !== undefined) document.getElementById('digMode' + i).value = s.digMode;
           updateCardUI(i);
         }
       });
     }
     document.getElementById('status').textContent = 'Connected';
+    // Fetch global frequency
+    fetch('/api/global-freq').then(function(r){return r.json();}).then(function(d){
+      if (d.freq) document.getElementById('globalFreq').value = d.freq;
+    }).catch(function(){});
   }).catch(() => {
     document.getElementById('status').textContent = 'Connection failed - retrying...';
     setTimeout(fetchState, 3000);
@@ -398,12 +513,52 @@ function onTypeChange(ch, type) {
 }
 
 function onInputChange(ch, src) {
-  inputs[ch] = src;
+  // Stop any active sequence/envelope playback before switching
+  if (sequences[ch].playing) seqStopPlay(ch);
+  if (sequences[ch].recording) seqStopRec(ch);
+  if (envelopes[ch].playing) envStop(ch);
+  var apiSrc = src;
+  if (src === 'ps4') {
+    document.getElementById('ps4sub' + ch).style.display = 'inline-block';
+    apiSrc = document.getElementById('ps4sub' + ch).value;
+  } else {
+    document.getElementById('ps4sub' + ch).style.display = 'none';
+  }
+  inputs[ch] = apiSrc;
   updateCardUI(ch);
   fetch('/api/input', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({channel: ch, input: src})
+    body: JSON.stringify({channel: ch, input: apiSrc})
+  }).catch(() => {});
+}
+
+function onPS4SubChange(ch, val) {
+  inputs[ch] = val;
+  fetch('/api/input', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel: ch, input: val})
+  }).catch(() => {});
+}
+
+function onDigitalConfig(ch) {
+  var pin = parseInt(document.getElementById('digPin' + ch).value);
+  var mode = parseInt(document.getElementById('digMode' + ch).value);
+  fetch('/api/digital-config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel: ch, pin: pin, mode: mode})
+  }).catch(() => {});
+}
+
+function onPwmRange(ch) {
+  var min = parseInt(document.getElementById('pwmMin' + ch).value) || 0;
+  var max = parseInt(document.getElementById('pwmMax' + ch).value) || 4095;
+  fetch('/api/pwm-range', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel: ch, min: min, max: max})
   }).catch(() => {});
 }
 
@@ -419,24 +574,46 @@ function onPotChange(ch, potIdx) {
 let sendTimer = null;
 let pendingChannel = -1;
 let pendingAngle = 0;
+let sliderDragging = false;
+let sliderDragTimer = null;
+let sliderSending = false;
 
 function onSlider(ch, val) {
   val = parseInt(val);
   angles[ch] = val;
   document.getElementById('val' + ch).textContent = formatValue(ch, val);
 
+  // Pause raw input polling while dragging to reduce WiFi contention
+  sliderDragging = true;
+  if (sliderDragTimer) clearTimeout(sliderDragTimer);
+  sliderDragTimer = setTimeout(function() { sliderDragging = false; }, 300);
+
   pendingChannel = ch;
   pendingAngle = val;
   if (!sendTimer) {
-    sendTimer = setTimeout(() => {
-      fetch('/api/output', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({channel: pendingChannel, angle: pendingAngle})
-      }).catch(() => {});
-      sendTimer = null;
-    }, 50);
+    sendTimer = setTimeout(flushSlider, 50);
   }
+}
+
+function flushSlider() {
+  sendTimer = null;
+  // Don't fire a new request while the previous one is still in-flight
+  if (sliderSending) { sendTimer = setTimeout(flushSlider, 30); return; }
+  if (pendingChannel < 0) return;
+  sliderSending = true;
+  var ch = pendingChannel, a = pendingAngle;
+  pendingChannel = -1;
+  fetch('/api/output', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel: ch, angle: a})
+  }).then(function() {
+    sliderSending = false;
+    // If a new value arrived while we were sending, flush it immediately
+    if (pendingChannel >= 0) { sendTimer = setTimeout(flushSlider, 0); }
+  }).catch(function() {
+    sliderSending = false;
+  });
 }
 
 // --- Per-Channel Sequence Recording & Playback ---
@@ -457,30 +634,48 @@ function seqStartRec(ch) {
   var btn = document.getElementById('seqRecBtn' + ch);
   btn.textContent = 'Stop';
   btn.className = 'btn-env-stop';
-  // If recording from external input, set ESP input and start polling
+
   if (seq.recInput !== 'manual') {
+    // External input: poll /api/raw-inputs, map value, drive servo from JS
     document.getElementById('seqSl' + ch).disabled = true;
-    if (seq.recInput.startsWith('pot_')) {
-      var potIdx = parseInt(seq.recInput.charAt(4));
-      fetch('/api/input', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({channel: ch, input: 'pot'})}).catch(function(){});
-      fetch('/api/pot-assign', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({channel: ch, pot: potIdx})}).catch(function(){});
-    } else {
-      fetch('/api/input', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({channel: ch, input: seq.recInput})}).catch(function(){});
-    }
-    seqPollLoop(ch);
+    seqRecPollLoop(ch);
+  } else {
+    // Manual: capture slider values
+    seq.recTimer = setInterval(function() {
+      var elapsed = (performance.now() - seq.startTime) / 1000;
+      seq.points.push({t: elapsed, a: angles[ch]});
+      seq.duration = elapsed;
+      document.getElementById('seqSl' + ch).value = angles[ch];
+      document.getElementById('val' + ch).textContent = formatValue(ch, angles[ch]);
+      drawSequence(ch);
+    }, 50);
   }
-  // Capture value every 50ms
-  seq.recTimer = setInterval(function() {
-    var elapsed = (performance.now() - seq.startTime) / 1000;
-    seq.points.push({t: elapsed, a: angles[ch]});
-    seq.duration = elapsed;
-    document.getElementById('seqSl' + ch).value = angles[ch];
-    document.getElementById('val' + ch).textContent = formatValue(ch, angles[ch]);
-    drawSequence(ch);
-  }, 50);
+}
+
+function seqRecPollLoop(ch) {
+  var seq = sequences[ch];
+  if (!seq.recording) return;
+  fetch('/api/raw-inputs').then(function(r) { return r.json(); }).then(function(raw) {
+    if (!seq.recording) return;
+    var val = mapControlInput(seq.recInput, raw);
+    if (val !== null) {
+      angles[ch] = val;
+      var elapsed = (performance.now() - seq.startTime) / 1000;
+      seq.points.push({t: elapsed, a: val});
+      seq.duration = elapsed;
+      // Drive the servo directly
+      fetch('/api/output', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({channel: ch, angle: val})
+      }).catch(function(){});
+      document.getElementById('seqSl' + ch).value = val;
+      document.getElementById('val' + ch).textContent = formatValue(ch, val);
+      drawSequence(ch);
+    }
+    if (seq.recording) seq.pollTimer = setTimeout(function() { seqRecPollLoop(ch); }, 40);
+  }).catch(function() {
+    if (seq.recording) seq.pollTimer = setTimeout(function() { seqRecPollLoop(ch); }, 100);
+  });
 }
 
 function seqStopRec(ch) {
@@ -493,28 +688,13 @@ function seqStopRec(ch) {
   var elapsed = (performance.now() - seq.startTime) / 1000;
   seq.points.push({t: elapsed, a: angles[ch]});
   seq.duration = elapsed;
-  // If was recording from external input, switch back to sequence
   if (seq.recInput !== 'manual') {
     document.getElementById('seqSl' + ch).disabled = false;
-    fetch('/api/input', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({channel: ch, input: 'sequence'})}).catch(function(){});
   }
   var btn = document.getElementById('seqRecBtn' + ch);
   btn.textContent = 'Rec';
   btn.className = 'btn-rec';
   drawSequence(ch);
-}
-
-function seqPollLoop(ch) {
-  if (!sequences[ch].recording) return;
-  fetch('/api/outputs').then(function(r) { return r.json(); }).then(function(data) {
-    if (Array.isArray(data) && data[ch]) {
-      angles[ch] = data[ch].angle;
-    }
-    if (sequences[ch].recording) sequences[ch].pollTimer = setTimeout(function() { seqPollLoop(ch); }, 40);
-  }).catch(function() {
-    if (sequences[ch].recording) sequences[ch].pollTimer = setTimeout(function() { seqPollLoop(ch); }, 100);
-  });
 }
 
 function seqTogglePlay(ch) {
@@ -595,9 +775,18 @@ function seqInterpolate(seq, t) {
 function seqSetLoop(ch, val) { sequences[ch].loop = val; }
 
 function seqSetSpeed(ch, val) {
-  var s = parseInt(val) / 100;
+  var s = parseInt(val) / 10;
   sequences[ch].timeScale = s;
-  document.getElementById('seqSpeedVal' + ch).textContent = (s % 1 === 0 ? s.toFixed(1) : String(s)) + 'x';
+  document.getElementById('seqSpeedVal' + ch).textContent = s.toFixed(1) + 'x';
+}
+
+function seqClear(ch) {
+  var seq = sequences[ch];
+  if (seq.playing) seqStopPlay(ch);
+  if (seq.recording) seqStopRec(ch);
+  seq.points = [];
+  seq.duration = 0;
+  drawSequence(ch);
 }
 
 function seqSaveCh(ch) {
@@ -705,7 +894,7 @@ function drawSequence(ch) {
 
   // Curve line
   if (seq.points.length > 1) {
-    ctx.strokeStyle = accentColor;
+    ctx.strokeStyle = channelColor(ch);
     ctx.lineWidth = 2;
     ctx.beginPath();
     for (var i = 0; i < seq.points.length; i++) {
@@ -738,7 +927,7 @@ function drawSequence(ch) {
 
   // Recording indicator
   if (seq.recording) {
-    ctx.fillStyle = accentColor;
+    ctx.fillStyle = channelColor(ch);
     ctx.font = 'bold 11px sans-serif';
     ctx.fillText('REC ' + seq.duration.toFixed(1) + 's', PAD_L + 4, PAD_T + 14);
   }
@@ -848,7 +1037,7 @@ function envMouseDown(ch, e) {
   if (idx >= 0) {
     env.dragging = idx;
   } else {
-    var np = {t: c.t, a: c.a};
+    var np = {t: envQuantizeT(ch, c.t), a: c.a};
     env.points.push(np);
     env.points.sort(function(a, b) { return a.t - b.t; });
     env.dragging = env.points.indexOf(np);
@@ -861,7 +1050,7 @@ function envMouseMove(ch, e) {
   if (env.dragging < 0) return;
   var pt = env.points[env.dragging];
   var c = envCanvasCoords(ch, e.clientX, e.clientY);
-  pt.t = c.t;
+  pt.t = envQuantizeT(ch, c.t);
   pt.a = c.a;
   env.points.sort(function(a, b) { return a.t - b.t; });
   env.dragging = env.points.indexOf(pt);
@@ -922,9 +1111,19 @@ function drawEnvelope(ch) {
     ctx.fillText(gt.toFixed(1) + 's', x - 10, H - 2);
   }
 
+  // Quantize grid (1/16th divisions)
+  if (env.quantize) {
+    ctx.strokeStyle = 'rgba(100,140,200,0.15)';
+    ctx.lineWidth = 0.5;
+    for (var qi = 0; qi <= 16; qi++) {
+      var qx = ENV_PAD + (qi / 16) * cw;
+      ctx.beginPath(); ctx.moveTo(qx, ENV_PADT); ctx.lineTo(qx, H - ENV_PADB); ctx.stroke();
+    }
+  }
+
   // Curve line
   if (env.points.length > 1) {
-    ctx.strokeStyle = accentColor;
+    ctx.strokeStyle = channelColor(ch);
     ctx.lineWidth = 2;
     ctx.beginPath();
     for (var i = 0; i < env.points.length; i++) {
@@ -941,7 +1140,7 @@ function drawEnvelope(ch) {
     var first = env.points[0];
     var pLast = envPointToCanvas(ch, last.t, last.a);
     var pWrap = envPointToCanvas(ch, env.duration, first.a);
-    ctx.strokeStyle = 'hsla(' + accentHue + ',75%,55%,0.5)';
+    ctx.strokeStyle = 'hsla(' + Math.round(ch * 340 / 15) + ',75%,55%,0.5)';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
@@ -956,7 +1155,7 @@ function drawEnvelope(ch) {
     var p = envPointToCanvas(ch, env.points[i].t, env.points[i].a);
     ctx.beginPath();
     ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-    ctx.fillStyle = (i === env.dragging) ? '#fff' : accentColor;
+    ctx.fillStyle = (i === env.dragging) ? '#fff' : channelColor(ch);
     ctx.fill();
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 1.5;
@@ -1055,6 +1254,91 @@ function loadEnvListAll() {
   }).catch(function() {});
 }
 
+function envClear(ch) {
+  var env = envelopes[ch];
+  if (env.playing) envStop(ch);
+  env.points = [{t: 0, a: 90}, {t: env.duration, a: 90}];
+  drawEnvelope(ch);
+}
+
+function envSetQuantize(ch, val) {
+  envelopes[ch].quantize = val;
+  drawEnvelope(ch);
+}
+
+function envSetSpeed(ch, val) {
+  var idx = parseInt(val);
+  if (idx < 0) idx = 0;
+  if (idx >= envSpeedSteps.length) idx = envSpeedSteps.length - 1;
+  envelopes[ch].speed = envSpeedSteps[idx].v;
+  document.getElementById('envSpeedVal' + ch).textContent = envSpeedSteps[idx].l;
+}
+
+function envQuantizeT(ch, t) {
+  var env = envelopes[ch];
+  if (!env.quantize) return t;
+  return Math.round(t * 16 / env.duration) * env.duration / 16;
+}
+
+function setGlobalFreq() {
+  var freq = parseInt(document.getElementById('globalFreq').value) || 50;
+  fetch('/api/global-freq', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({freq: freq})
+  }).catch(function() {});
+}
+
+function stopAll() {
+  fetch('/api/stop-all', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}'
+  }).catch(function() {});
+  // Stop all client-side animations
+  for (var i = 0; i < NUM; i++) {
+    if (envelopes[i].playing) envStop(i);
+    if (sequences[i].playing) seqStopPlay(i);
+  }
+}
+
+function envSetCtrlInput(ch, val) {
+  var env = envelopes[ch];
+  // Stop previous polling
+  if (env.controlPollTimer) { clearTimeout(env.controlPollTimer); env.controlPollTimer = null; }
+  env.controlInput = val;
+  env.lastControlVal = false;
+  if (val) envCtrlPoll(ch);
+}
+
+function envCtrlPoll(ch) {
+  var env = envelopes[ch];
+  if (!env.controlInput) return;
+  var ci = env.controlInput;
+  fetch('/api/raw-inputs').then(function(r){return r.json();}).then(function(raw) {
+    var val = false;
+    if (ci.startsWith('dig_')) {
+      var pin = parseInt(ci.charAt(4));
+      val = !!(raw.digital && raw.digital[pin]);
+    } else if (ci.startsWith('ps4_')) {
+      if (raw.ps4 && raw.ps4.connected) {
+        var key = ci.substring(4);
+        var v = raw.ps4[key];
+        if (typeof v === 'boolean') val = v;
+        else if (typeof v === 'number') val = (v > 64 || v < -64);
+      }
+    }
+    if (val && !env.lastControlVal) {
+      // Rising edge — toggle play/stop
+      if (env.playing) envStop(ch); else envPlay(ch);
+    }
+    env.lastControlVal = val;
+    if (env.controlInput) env.controlPollTimer = setTimeout(function(){ envCtrlPoll(ch); }, 100);
+  }).catch(function() {
+    if (env.controlInput) env.controlPollTimer = setTimeout(function(){ envCtrlPoll(ch); }, 200);
+  });
+}
+
 function envInterpolate(env, t) {
   var pts = env.points;
   if (pts.length === 0) return 90;
@@ -1092,26 +1376,28 @@ function envPlay(ch) {
   btn.textContent = 'Stop';
   btn.className = 'btn-env-stop';
 
-  // Build points for ESP-side curve playback
-  var pts = env.points.map(function(p) { return {t: p.t, a: p.a}; });
+  // Build points for ESP-side curve playback (apply speed)
+  var spd = env.speed;
+  var scaledDur = env.duration / spd;
+  var pts = env.points.map(function(p) { return {t: p.t / spd, a: p.a}; });
   // For loop mode, add wrap-around point back to first value
   if (env.loop && pts.length > 0) {
     var last = pts[pts.length - 1];
-    if (last.t < env.duration - 0.001) {
-      pts.push({t: env.duration, a: pts[0].a});
+    if (last.t < scaledDur - 0.001) {
+      pts.push({t: scaledDur, a: pts[0].a});
     }
   }
   // Send all points to ESP for smooth ~1kHz interpolation
   fetch('/api/curve-play', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({channel: ch, duration: env.duration, loop: env.loop, points: pts})
+    body: JSON.stringify({channel: ch, duration: scaledDur, loop: env.loop, points: pts})
   }).catch(function() {});
 
   // RAF loop only for visual cursor animation (no motor control)
   function frame() {
     if (!env.playing) return;
-    var elapsed = (performance.now() - env.startTime) / 1000;
+    var elapsed = (performance.now() - env.startTime) / 1000 * spd;
     var t = env.loop ? (elapsed % env.duration) : elapsed;
     if (!env.loop && t > env.duration) { envStop(ch); return; }
     var angle = envInterpolate(env, t);
@@ -1181,7 +1467,73 @@ function otaUpload() {
   xhr.send(form);
 }
 
+// --- Raw input polling for live value display ---
+var rawInputs = null;
+var rawPollTimer = null;
+
+var ps4Connected = false;
+var ps4PollSkip = 0;
+
+function startRawPoll() {
+  if (rawPollTimer) return;
+  rawPollTimer = setInterval(pollRawInputs, 500);
+}
+
+function pollRawInputs() {
+  // Skip polling while slider is being dragged to reduce WiFi contention
+  if (sliderDragging) return;
+  // When PS4 is connected, only fetch /api/outputs to reduce WiFi traffic.
+  // Every 10th cycle (~5s), do a full raw-inputs poll to detect PS4 disconnect.
+  if (ps4Connected && ++ps4PollSkip < 10) {
+    fetch('/api/outputs').then(function(r) { return r.json(); }).then(function(data) {
+      if (!Array.isArray(data)) return;
+      for (var i = 0; i < NUM && i < data.length; i++) {
+        var src = inputs[i];
+        if (src === 'manual' || src === 'envelope' || src === 'sequence') continue;
+        var a = Math.round(data[i].angle);
+        angles[i] = a;
+        document.getElementById('val' + i).textContent = formatValue(i, a);
+        var extSl = document.getElementById('extSl' + i);
+        if (extSl) extSl.value = a;
+      }
+    }).catch(function() {});
+    return;
+  }
+  ps4PollSkip = 0;
+  fetch('/api/raw-inputs').then(function(r) { return r.json(); }).then(function(data) {
+    rawInputs = data;
+    // Track PS4 connection state to reduce polling when connected
+    if (data && data.ps4) ps4Connected = !!data.ps4.connected;
+    updateRawValues();
+    // Chain outputs fetch after raw-inputs completes (sequential, not parallel)
+    return fetch('/api/outputs');
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (!Array.isArray(data)) return;
+    for (var i = 0; i < NUM && i < data.length; i++) {
+      var src = inputs[i];
+      if (src === 'manual' || src === 'envelope' || src === 'sequence') continue;
+      var a = Math.round(data[i].angle);
+      angles[i] = a;
+      document.getElementById('val' + i).textContent = formatValue(i, a);
+      var extSl = document.getElementById('extSl' + i);
+      if (extSl) extSl.value = a;
+    }
+  }).catch(function() {});
+}
+
+function updateRawValues() {
+  if (!rawInputs) return;
+  for (var i = 0; i < NUM; i++) {
+    var el = document.getElementById('rawVal' + i);
+    if (!el) continue;
+    var src = inputs[i];
+    var digPin = parseInt(document.getElementById('digPin' + i).value) || 0;
+    el.textContent = formatRawInput(src, pots[i], digPin, rawInputs);
+  }
+}
+
 init();
+startRawPoll();
 </script>
 </body>
 </html>

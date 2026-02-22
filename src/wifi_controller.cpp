@@ -1,5 +1,7 @@
 #include "wifi_controller.h"
 #include "output_controller.h"
+#include "digital_input.h"
+#include "ps4_input.h"
 #include "web_ui.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
@@ -35,8 +37,10 @@ static void _wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
 }
 
-void WiFiController::init(OutputController* outputCtrl) {
+void WiFiController::init(OutputController* outputCtrl, DigitalInput* digitalInput, PS4Input* ps4Input) {
     _outputCtrl = outputCtrl;
+    _digitalInput = digitalInput;
+    _ps4Input = ps4Input;
     WiFi.onEvent(_wifiEventHandler);
     _setupWiFi();
     _setupRoutes();
@@ -66,17 +70,18 @@ void WiFiController::_setupWiFi() {
             WiFi.mode(WIFI_AP);
             WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, 1, 0, 4);
             delay(100);
-            esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
             Serial.print("[WiFi] AP started, IP: ");
             Serial.println(WiFi.softAPIP());
         }
+        // Balance WiFi/BT coexistence (PREFER_BT not available in this ESP-IDF).
+        esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
     } else {
         WiFi.mode(WIFI_AP);
         WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, 1, 0, 4);
         delay(500);
         WiFi.setSleep(false);
         esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
-        esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+        esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
         Serial.print("[WiFi] AP started: ");
         Serial.print(WIFI_AP_SSID);
         Serial.print(", Password: ");
@@ -88,6 +93,8 @@ void WiFiController::_setupWiFi() {
 
 void WiFiController::_setupRoutes() {
     OutputController* sc = _outputCtrl;
+    DigitalInput* di = _digitalInput;
+    PS4Input* ps4 = _ps4Input;
 
     // Serve Web UI
     _server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -109,7 +116,6 @@ void WiFiController::_setupRoutes() {
                 case OUTPUT_MOTOR: obj["type"] = "motor"; break;
                 case OUTPUT_LEGO:  obj["type"] = "lego";  break;
                 case OUTPUT_PWM:      obj["type"] = "pwm";      break;
-                case OUTPUT_MOTOR_1K: obj["type"] = "motor1k";  break;
             }
             switch (ch.inputSource) {
                 case INPUT_MANUAL:     obj["input"] = "manual";     break;
@@ -128,8 +134,13 @@ void WiFiController::_setupRoutes() {
                 case INPUT_PS4_L1:     obj["input"] = "ps4_l1";     break;
                 case INPUT_PS4_R1:     obj["input"] = "ps4_r1";     break;
                 case INPUT_SEQUENCE:   obj["input"] = "sequence";   break;
+                case INPUT_DIGITAL:    obj["input"] = "digital";    break;
             }
             obj["pot"] = ch.potIndex;
+            obj["pwmMin"] = ch.pwmMin;
+            obj["pwmMax"] = ch.pwmMax;
+            obj["digPin"] = ch.digitalPin;
+            obj["digMode"] = ch.digitalMode;
         }
         String json;
         serializeJson(doc, json);
@@ -192,7 +203,6 @@ void WiFiController::_setupRoutes() {
             else if (strcmp(typeStr, "motor") == 0) type = OUTPUT_MOTOR;
             else if (strcmp(typeStr, "lego") == 0) type = OUTPUT_LEGO;
             else if (strcmp(typeStr, "pwm") == 0) type = OUTPUT_PWM;
-            else if (strcmp(typeStr, "motor1k") == 0) type = OUTPUT_MOTOR_1K;
             else {
                 request->send(400, "application/json", "{\"error\":\"invalid type\"}");
                 return;
@@ -231,6 +241,7 @@ void WiFiController::_setupRoutes() {
             else if (strcmp(inStr, "ps4_l1") == 0) src = INPUT_PS4_L1;
             else if (strcmp(inStr, "ps4_r1") == 0) src = INPUT_PS4_R1;
             else if (strcmp(inStr, "sequence") == 0) src = INPUT_SEQUENCE;
+            else if (strcmp(inStr, "digital") == 0) src = INPUT_DIGITAL;
             else {
                 request->send(400, "application/json", "{\"error\":\"invalid input\"}");
                 return;
@@ -253,6 +264,138 @@ void WiFiController::_setupRoutes() {
             uint8_t channel = doc["channel"] | 0;
             uint8_t pot = doc["pot"] | 0;
             sc->setChannelPot(channel, pot);
+            request->send(200, "application/json", "{\"ok\":true}");
+        }
+    );
+
+    // POST /api/pwm-range - set PWM tick range for a channel
+    _server.on("/api/pwm-range", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        nullptr,
+        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+                request->send(400, "application/json", "{\"error\":\"invalid json\"}");
+                return;
+            }
+            uint8_t channel = doc["channel"] | 0;
+            uint16_t pwmMin = doc["min"] | 0;
+            uint16_t pwmMax = doc["max"] | 4095;
+            sc->setChannelRange(channel, pwmMin, pwmMax);
+            request->send(200, "application/json", "{\"ok\":true}");
+        }
+    );
+
+    // POST /api/digital-config - set digital pin and mode for a channel
+    _server.on("/api/digital-config", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        nullptr,
+        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+                request->send(400, "application/json", "{\"error\":\"invalid json\"}");
+                return;
+            }
+            uint8_t channel = doc["channel"] | 0;
+            if (channel >= NUM_OUTPUTS) {
+                request->send(400, "application/json", "{\"error\":\"invalid channel\"}");
+                return;
+            }
+            // Access channel directly via getChannel (const) — need non-const access
+            // Use output controller methods instead
+            OutputChannel& ch = const_cast<OutputChannel&>(sc->getChannel(channel));
+            ch.digitalPin = doc["pin"] | 0;
+            ch.digitalMode = doc["mode"] | 0;
+            request->send(200, "application/json", "{\"ok\":true}");
+        }
+    );
+
+    // GET /api/digital-state - get current digital pin states
+    _server.on("/api/digital-state", HTTP_GET, [di](AsyncWebServerRequest* request) {
+        JsonDocument doc;
+        JsonArray arr = doc["pins"].to<JsonArray>();
+        for (uint8_t i = 0; i < NUM_POTS; i++) {
+            arr.add(di ? di->getPinState(i) : false);
+        }
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+    });
+
+    // GET /api/raw-inputs - get raw hardware input values (PS4, analog, digital)
+    // IMPORTANT: Read from cached PS4State (updated in main loop) — never call
+    // PS4 library directly from the web server task (causes BT HCI crash).
+    _server.on("/api/raw-inputs", HTTP_GET, [di, ps4](AsyncWebServerRequest* request) {
+        JsonDocument doc;
+        // PS4 controller — read from cached state (thread-safe)
+        JsonObject ps4obj = doc["ps4"].to<JsonObject>();
+        if (ps4) {
+            const PS4State& s = ps4->getState();
+            ps4obj["connected"] = s.connected;
+            ps4obj["lx"] = s.lx;
+            ps4obj["ly"] = s.ly;
+            ps4obj["rx"] = s.rx;
+            ps4obj["ry"] = s.ry;
+            ps4obj["l2"] = s.l2;
+            ps4obj["r2"] = s.r2;
+            ps4obj["cross"] = s.cross;
+            ps4obj["circle"] = s.circle;
+            ps4obj["square"] = s.square;
+            ps4obj["triangle"] = s.triangle;
+            ps4obj["l1"] = s.l1;
+            ps4obj["r1"] = s.r1;
+        } else {
+            ps4obj["connected"] = false;
+            ps4obj["lx"] = 0; ps4obj["ly"] = 0;
+            ps4obj["rx"] = 0; ps4obj["ry"] = 0;
+            ps4obj["l2"] = 0; ps4obj["r2"] = 0;
+            ps4obj["cross"] = false; ps4obj["circle"] = false;
+            ps4obj["square"] = false; ps4obj["triangle"] = false;
+            ps4obj["l1"] = false; ps4obj["r1"] = false;
+        }
+        // Analog inputs (raw ADC values 0-4095)
+        JsonArray analog = doc["analog"].to<JsonArray>();
+        for (uint8_t i = 0; i < NUM_POTS; i++) {
+            analog.add(analogRead(POT_PINS[i]));
+        }
+        // Digital inputs (debounced pin states)
+        JsonArray digital = doc["digital"].to<JsonArray>();
+        for (uint8_t i = 0; i < NUM_POTS; i++) {
+            digital.add(di ? di->getPinState(i) : false);
+        }
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+    });
+
+    // POST /api/global-freq - set global PWM frequency
+    _server.on("/api/global-freq", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        nullptr,
+        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+                request->send(400, "application/json", "{\"error\":\"invalid json\"}");
+                return;
+            }
+            uint16_t freq = doc["freq"] | 50;
+            sc->setGlobalFrequency(freq);
+            request->send(200, "application/json", "{\"ok\":true}");
+        }
+    );
+
+    // GET /api/global-freq - get current PWM frequency
+    _server.on("/api/global-freq", HTTP_GET, [sc](AsyncWebServerRequest* request) {
+        String json = "{\"freq\":" + String(sc->getGlobalFrequency()) + "}";
+        request->send(200, "application/json", json);
+    });
+
+    // POST /api/stop-all - stop all curve playback
+    _server.on("/api/stop-all", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        nullptr,
+        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+            sc->stopAllCurves();
             request->send(200, "application/json", "{\"ok\":true}");
         }
     );

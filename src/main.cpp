@@ -6,16 +6,18 @@
 #include "wifi_controller.h"
 #include "ps4_input.h"
 #include "analog_input.h"
+#include "digital_input.h"
 
 OutputController  outputController;
 WiFiController   wifiController;
 PS4Input         ps4Input;
 AnalogInput      analogInput;
+DigitalInput     digitalInput;
 
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println("\n=== Output Controller Starting ===");
+    Serial.println("\n=== Universal PWM Control Starting ===");
 
     // Initialize LittleFS
     if (!LittleFS.begin(true)) {
@@ -31,8 +33,11 @@ void setup() {
     // Initialize output controller (PCA9685)
     outputController.init();
 
+    // Initialize digital inputs (before WiFi so pointer is ready)
+    digitalInput.init(&outputController);
+
     // Initialize WiFi + Web UI + REST API
-    wifiController.init(&outputController);
+    wifiController.init(&outputController, &digitalInput, &ps4Input);
 
     // Initialize PS4 controller (Bluetooth Classic)
     ps4Input.init(&outputController);
@@ -43,12 +48,13 @@ void setup() {
     Serial.printf("[Heap] Free: %lu bytes\n", (unsigned long)ESP.getFreeHeap());
     Serial.printf("[Log] Level: %d (%s)\n", LOG_LEVEL,
                   LOG_LEVEL == 0 ? "ERROR" : LOG_LEVEL == 1 ? "INFO" : "DEBUG");
-    Serial.println("=== Output Controller Ready ===\n");
+    Serial.println("=== Universal PWM Control Ready ===\n");
 }
 
 void loop() {
     ps4Input.update();
     analogInput.update();
+    digitalInput.update();
     outputController.update();
 
 #if LOG_LEVEL >= 2

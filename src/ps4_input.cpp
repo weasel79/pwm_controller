@@ -12,6 +12,23 @@ void PS4Input::init(OutputController* outputCtrl) {
 void PS4Input::update() {
     _connected = PS4.isConnected();
 
+    // Always cache state (defaults to 0/false when disconnected)
+    _state.connected = _connected;
+    if (_connected) {
+        _state.lx = PS4.LStickX();
+        _state.ly = PS4.LStickY();
+        _state.rx = PS4.RStickX();
+        _state.ry = PS4.RStickY();
+        _state.l2 = PS4.L2Value();
+        _state.r2 = PS4.R2Value();
+        _state.cross = PS4.Cross();
+        _state.circle = PS4.Circle();
+        _state.square = PS4.Square();
+        _state.triangle = PS4.Triangle();
+        _state.l1 = PS4.L1();
+        _state.r1 = PS4.R1();
+    }
+
     if (_connected && !_wasConnected) {
         Serial.println("[PS4] Controller connected");
         _wasConnected = true;
@@ -26,13 +43,13 @@ void PS4Input::update() {
     if (now - _lastUpdateMs < PS4_UPDATE_MS) return;
     _lastUpdateMs = now;
 
-    // Read PS4 values
-    int lx = PS4.LStickX();   // -128..127
-    int ly = PS4.LStickY();
-    int rx = PS4.RStickX();
-    int ry = PS4.RStickY();
-    int l2 = PS4.L2Value();   // 0..255
-    int r2 = PS4.R2Value();
+    // Use cached values
+    int lx = _state.lx;
+    int ly = _state.ly;
+    int rx = _state.rx;
+    int ry = _state.ry;
+    int l2 = _state.l2;
+    int r2 = _state.r2;
 
 #if LOG_LEVEL >= 2
     bool doTrace = (now - _lastTraceMs >= 1000);
@@ -76,27 +93,27 @@ void PS4Input::update() {
                 srcName = "R2";
                 break;
             case INPUT_PS4_CROSS:
-                val = PS4.Cross() ? 180 : 0;
+                val = _state.cross ? 180 : 0;
                 srcName = "CROSS";
                 break;
             case INPUT_PS4_CIRCLE:
-                val = PS4.Circle() ? 180 : 0;
+                val = _state.circle ? 180 : 0;
                 srcName = "CIRCLE";
                 break;
             case INPUT_PS4_SQUARE:
-                val = PS4.Square() ? 180 : 0;
+                val = _state.square ? 180 : 0;
                 srcName = "SQUARE";
                 break;
             case INPUT_PS4_TRIANGLE:
-                val = PS4.Triangle() ? 180 : 0;
+                val = _state.triangle ? 180 : 0;
                 srcName = "TRI";
                 break;
             case INPUT_PS4_L1:
-                val = PS4.L1() ? 180 : 0;
+                val = _state.l1 ? 180 : 0;
                 srcName = "L1";
                 break;
             case INPUT_PS4_R1:
-                val = PS4.R1() ? 180 : 0;
+                val = _state.r1 ? 180 : 0;
                 srcName = "R1";
                 break;
             default:

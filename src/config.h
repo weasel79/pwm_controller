@@ -3,7 +3,7 @@
 // ---- WiFi Configuration ----
 #define WIFI_SSID       "blndr"
 #define WIFI_PASSWORD   "1Secret3"
-#define WIFI_AP_SSID    "OutputController"
+#define WIFI_AP_SSID    "UniversalPWM"
 #define WIFI_AP_PASSWORD "servo1234"
 // Set to true to connect to an existing network (STA mode),
 // false to create an access point (AP mode)
@@ -20,6 +20,13 @@
 #define OUTPUT_DEFAULT_MIN_US  500
 #define OUTPUT_DEFAULT_MAX_US 2500
 #define OUTPUT_DEFAULT_VALUE   90
+
+// PWM tick defaults (12-bit PCA9685: 0-4095)
+// Servo @ 50Hz: 500us = 102 ticks, 2500us = 512 ticks  (ticks = us * 4096 / 20000)
+#define SERVO_DEFAULT_PWM_MIN  102
+#define SERVO_DEFAULT_PWM_MAX  512
+#define MOTOR_DEFAULT_PWM_MIN  0
+#define MOTOR_DEFAULT_PWM_MAX  4095
 
 // ---- Analog Input Pins (ADC1 only - ADC2 conflicts with WiFi) ----
 // Potentiometer pins (connect wiper to pin, ends to 3.3V and GND)
