@@ -74,3 +74,38 @@ Default loop stack (8192) is required. `-DARDUINO_LOOP_STACK_SIZE=4096` causes c
 | GET/POST | `/api/env-*` | Envelope save/load/list/del |
 | GET/POST | `/api/preset-*` | Preset save/load/list/del |
 | POST | `/api/ota` | Firmware upload |
+
+---
+
+## Session — 2026-02-27 — PS4 stability fixes, slider flow control, ELRS/scripting/Blockly roadmap
+
+### Summary
+- Fixed PS4 controller crash under sustained WiFi+BT load (smart polling, flow control)
+- Fixed slider lag from AsyncTCP rx/ack timeouts during rapid fader movement
+- Created new sister project esp32-mouldking-test (MouldKing BLE motor control)
+- Assessed three roadmap features: ELRS RC input, embedded scripting, Blockly visual programming
+- Wrote `roadmap assessment.md` with full technical analysis
+
+### Key findings
+- `ESP_COEX_PREFER_BT` causes `abort()` at boot on ESP-IDF 4.4 — only `PREFER_BALANCE` works
+- `WiFi.setSleep(false)` causes `abort()` in STA mode — only safe in AP mode
+- Slider lag root cause: 30ms throttle fires new fetch while previous still in-flight → TCP pileup
+- Fix: flow control flag (`sliderSending`) ensures max 1 HTTP request in-flight at a time
+- Smart polling: skip `/api/raw-inputs` when PS4 connected (data routing is ESP-side), only fetch `/api/outputs`
+- ELRS receiver: CRSF serial on UART2 (GPIO 16/17), 420K baud, AlfredoCRSF library, ~2KB flash
+- RadioMaster Pocket: 4 gimbals + 5 switches + 1 pot + 6 configurable = 16 channels
+- MyBasic scripting: ~10-15KB heap, runs in FreeRTOS task, good fit for 54KB free heap
+- Blockly from CDN: ~0KB ESP32 flash, generates JSON action sequences for ESP32 execution
+
+### Issues
+- PS4 may still crash under very sustained load (~2+ min) — smart polling reduces but may not eliminate
+- `roadmap assessment.md` not yet committed to git
+
+### To-do
+- Phase 1: Implement ELRS input (~4-6h) — plan written, ready to start
+- Phase 2: Implement scripting engine (~8-12h)
+- Phase 3: Implement Blockly visual editor (~12-16h)
+
+### Ideas
+- ELRS + Blockly synergy: "Wait until ELRS CH5 > 128" blocks for RC-triggered sequences
+- Blockly generates MyBasic/Lua scripts instead of JSON for unified backend
