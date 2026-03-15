@@ -151,6 +151,10 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
 <h1>Universal PWM Control</h1>
 <div id="status">Connecting...</div>
 <div class="grid" id="outputs"></div>
+<div id="mkSection" style="display:none;max-width:1200px;margin:16px auto;text-align:center;">
+  <button id="mkConnBtn" onclick="mkToggleConnect()" style="padding:6px 16px;border:none;border-radius:4px;background:#f5a623;color:#000;font-size:13px;font-weight:600;cursor:pointer;">Reconnect MK</button>
+  <span id="mkStatus" style="font-size:13px;color:#aaa;margin-left:8px;"></span>
+</div>
 <div class="section" id="globalSection">
   <h3>Global</h3>
   <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -191,14 +195,19 @@ var envSpeedSteps = [
   {v:0.125, l:'1/8x'}, {v:1/16, l:'1/16x'}
 ];
 
-const NUM = 16;
+const PCA_NUM = 16;
+const MK_NUM = 6;
+const MK_START = PCA_NUM;
+const TOTAL = PCA_NUM + MK_NUM;
+var NUM = PCA_NUM;  // dynamic: set to TOTAL when MK connected
+const MK_NAMES = ['MK A','MK B','MK C','MK D','MK E','MK F'];
 const POT_PINS = [34, 35, 32, 33];
-let angles = new Array(NUM).fill(90);
-let types = new Array(NUM).fill('servo');
-let inputs = new Array(NUM).fill('manual');
-let pots = new Array(NUM).fill(0);
+let angles = new Array(TOTAL).fill(90);
+let types = new Array(TOTAL).fill('servo');
+let inputs = new Array(TOTAL).fill('manual');
+let pots = new Array(TOTAL).fill(0);
 let envelopes = [];
-for (let i = 0; i < NUM; i++) {
+for (let i = 0; i < TOTAL; i++) {
   envelopes.push({
     points: [{t: 0, a: 90}, {t: 2.0, a: 90}],
     duration: 2.0, loop: false, playing: false,
@@ -210,7 +219,7 @@ for (let i = 0; i < NUM; i++) {
   });
 }
 let sequences = [];
-for (let i = 0; i < NUM; i++) {
+for (let i = 0; i < TOTAL; i++) {
   sequences.push({
     points: [], duration: 0, loop: false,
     playing: false, recording: false,
@@ -275,13 +284,17 @@ function formatRawInput(src, potIdx, digPin, raw) {
 
 function init() {
   const grid = document.getElementById('outputs');
-  for (let i = 0; i < NUM; i++) {
+  for (let i = 0; i < TOTAL; i++) {
+    var isMK = i >= MK_START;
+    var cardTitle = isMK ? MK_NAMES[i - MK_START] : 'Output ' + i;
+    var cardColor = isMK ? '#f5a623' : channelColor(i);
     const card = document.createElement('div');
     card.className = 'output-card';
     card.id = 'card' + i;
-    card.style.setProperty('--ch-color', channelColor(i));
+    if (isMK) card.style.display = 'none';  // hidden until MK connects
+    card.style.setProperty('--ch-color', cardColor);
     card.innerHTML = `
-      <div class="card-title">Output ${i}</div>
+      <div class="card-title">${cardTitle}</div>
       <div class="ctrl-row">
         <select id="in${i}" onchange="onInputChange(${i},this.value)">
           <option value="manual">Manual</option>
@@ -458,26 +471,44 @@ function updateCardUI(ch) {
 function fetchState() {
   fetch('/api/outputs').then(r => r.json()).then(data => {
     if (Array.isArray(data)) {
+      // Show/hide MK cards based on whether server returned > 16 channels
+      var hasMK = data.length > PCA_NUM;
+      NUM = hasMK ? TOTAL : PCA_NUM;
+      for (var m = MK_START; m < TOTAL; m++) {
+        var c = document.getElementById('card' + m);
+        if (c) c.style.display = hasMK ? '' : 'none';
+      }
+      // Update MK section visibility
+      var mkSec = document.getElementById('mkSection');
+      if (mkSec) mkSec.style.display = hasMK ? '' : 'none';
       data.forEach((s, i) => {
-        if (i < NUM) {
+        if (i < TOTAL) {
           angles[i] = s.angle;
-          document.getElementById('sl' + i).value = s.angle;
-          document.getElementById('extSl' + i).value = s.angle;
-          document.getElementById('seqSl' + i).value = s.angle;
+          var sl = document.getElementById('sl' + i);
+          if (sl) sl.value = s.angle;
+          var extSl = document.getElementById('extSl' + i);
+          if (extSl) extSl.value = s.angle;
+          var seqSl = document.getElementById('seqSl' + i);
+          if (seqSl) seqSl.value = s.angle;
           if (s.type) {
             types[i] = s.type;
-            document.getElementById('type' + i).value = s.type;
+            var typeEl = document.getElementById('type' + i);
+            if (typeEl) typeEl.value = s.type;
           }
-          document.getElementById('val' + i).textContent = formatValue(i, s.angle);
-          if (s.name) document.getElementById('name' + i).textContent = s.name;
+          var valEl = document.getElementById('val' + i);
+          if (valEl) valEl.textContent = formatValue(i, s.angle);
           if (s.input) {
             inputs[i] = s.input;
           }
           if (s.pot !== undefined) pots[i] = s.pot;
-          if (s.pwmMin !== undefined) document.getElementById('pwmMin' + i).value = s.pwmMin;
-          if (s.pwmMax !== undefined) document.getElementById('pwmMax' + i).value = s.pwmMax;
-          if (s.digPin !== undefined) document.getElementById('digPin' + i).value = s.digPin;
-          if (s.digMode !== undefined) document.getElementById('digMode' + i).value = s.digMode;
+          var pmn = document.getElementById('pwmMin' + i);
+          if (pmn && s.pwmMin !== undefined) pmn.value = s.pwmMin;
+          var pmx = document.getElementById('pwmMax' + i);
+          if (pmx && s.pwmMax !== undefined) pmx.value = s.pwmMax;
+          var dp = document.getElementById('digPin' + i);
+          if (dp && s.digPin !== undefined) dp.value = s.digPin;
+          var dm = document.getElementById('digMode' + i);
+          if (dm && s.digMode !== undefined) dm.value = s.digMode;
           updateCardUI(i);
         }
       });
@@ -1473,15 +1504,27 @@ var rawPollTimer = null;
 
 var ps4Connected = false;
 var ps4PollSkip = 0;
+var pollSkipCount = 0;
+var mkDragging = false;
+var mkDragTimer = null;
+
+function hasActivePlayback() {
+  for (var i = 0; i < NUM; i++) {
+    if (envelopes[i].playing || sequences[i].playing) return true;
+  }
+  return false;
+}
 
 function startRawPoll() {
   if (rawPollTimer) return;
-  rawPollTimer = setInterval(pollRawInputs, 500);
+  rawPollTimer = setInterval(pollRawInputs, 1000);
 }
 
 function pollRawInputs() {
-  // Skip polling while slider is being dragged to reduce WiFi contention
-  if (sliderDragging) return;
+  // Reduce poll rate while sliders are being dragged (skip 3 of 4 cycles)
+  if ((sliderDragging || mkDragging) && ++pollSkipCount % 4 !== 0) return;
+  // Reduce poll rate during active playback (skip every other cycle)
+  if (hasActivePlayback() && ++pollSkipCount % 2 === 0) return;
   // When PS4 is connected, only fetch /api/outputs to reduce WiFi traffic.
   // Every 10th cycle (~5s), do a full raw-inputs poll to detect PS4 disconnect.
   if (ps4Connected && ++ps4PollSkip < 10) {
@@ -1532,8 +1575,54 @@ function updateRawValues() {
   }
 }
 
+// --- MouldKing connect/disconnect ---
+var mkConnected = false;
+
+function mkToggleConnect() {
+  var action = mkConnected ? 'disconnect' : 'connect';
+  var btn = document.getElementById('mkConnBtn');
+  btn.disabled = true;
+  btn.textContent = action === 'connect' ? 'Connecting...' : 'Disconnecting...';
+  fetch('/api/mk-connect', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: action})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    mkConnected = !!d.connected;
+    mkUpdateUI();
+    fetchState();  // refresh all channels
+    btn.disabled = false;
+  }).catch(function() { btn.disabled = false; });
+}
+
+function mkUpdateUI() {
+  var btn = document.getElementById('mkConnBtn');
+  var status = document.getElementById('mkStatus');
+  if (mkConnected) {
+    NUM = TOTAL;
+    btn.textContent = 'Disconnect MK';
+    btn.style.background = '#e94560'; btn.style.color = '#fff';
+    status.textContent = 'Connected'; status.style.color = '#4caf50';
+    for (var m = MK_START; m < TOTAL; m++) {
+      var c = document.getElementById('card' + m);
+      if (c) c.style.display = '';
+    }
+  } else {
+    NUM = PCA_NUM;
+    btn.textContent = 'Connect MK';
+    btn.style.background = '#f5a623'; btn.style.color = '#000';
+    status.textContent = 'Disconnected'; status.style.color = '#aaa';
+    for (var m = MK_START; m < TOTAL; m++) {
+      var c = document.getElementById('card' + m);
+      if (c) c.style.display = 'none';
+    }
+  }
+}
+
 init();
 startRawPoll();
+// MK connection state is detected from /api/outputs response length (no separate poll needed)
+document.getElementById('mkSection').style.display = '';
 </script>
 </body>
 </html>

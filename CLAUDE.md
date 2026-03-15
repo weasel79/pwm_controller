@@ -109,3 +109,68 @@ Default loop stack (8192) is required. `-DARDUINO_LOOP_STACK_SIZE=4096` causes c
 ### Ideas
 - ELRS + Blockly synergy: "Wait until ELRS CH5 > 128" blocks for RC-triggered sequences
 - Blockly generates MyBasic/Lua scripts instead of JSON for unified backend
+
+---
+
+## Session — 2026-03-15 — MouldKing BLE integration, PS4 fix, TCP optimization
+
+### Summary
+Integrated MouldKing 6.0 BLE motor control (6 channels A-F) into the PWM controller.
+MK channels appear as virtual outputs 16-21 in the web UI with full input routing
+(manual, envelope, sequence, pot, PS4, digital). Fixed PS4 controller not connecting
+after MK integration. Addressed AsyncTCP socket exhaustion causing web UI freezes.
+Added mDNS (http://pwm.local). Renamed project from servo-geloet-esp32.
+
+### Key findings
+- **NimBLE + Bluedroid conflict**: NimBLE (MouldKingino) and PS4's Bluedroid Classic BT cannot coexist — NimBLE takes over BLE controller, PS4's Bluedroid init breaks NimBLE advertising silently
+- **Fix**: Bypass NimBLE entirely, use Bluedroid BLE GAP API (`esp_ble_gap_*`) directly — both Classic BT (PS4) and BLE (MK advertising) share one Bluedroid stack
+- **MK protocol**: MK60 BLE advertising with encrypted payloads (CRC16 + whitening), company ID 0xFFF0, 24-byte encrypted packets. Protocol from MouldKingino (MIT license)
+- **PS4 MAC must be set before btStart()**: `esp_base_mac_addr_set()` must be called before any BT controller init. MK init calls `btStart()` first, so MAC must be set in early setup()
+- **AsyncTCP socket exhaustion**: ESP32 AsyncTCP has ~4 concurrent connection slots. Multiple concurrent polls + slider sends + BLE radio contention → ack/rx timeouts → web UI freeze
+- **Fix**: `Connection: close` on all JSON responses, reduced poll from 500ms→1000ms, eliminated separate MK status poll, MK BLE advertising only on value change + 500ms keepalive
+- **Digital GPIO error**: `digitalRead()` on pins 32-35 without `pinMode()` spams errors. Fix: only read pins assigned to active digital-input channels
+- **platformio.ini corruption**: Stray keystrokes in IDE can corrupt first line. First line was `ld it [env:esp32]` instead of `[env:esp32]`
+- **Combined API endpoint**: Created `/api/state` returning outputs + raw-inputs + freq in one request (available but not yet wired to JS)
+
+### Architecture changes
+- `mk_input.h/.cpp` — MouldKing BLE motor controller with Bluedroid GAP advertising, curve playback, PS4/pot input routing
+- MK channels are virtual outputs 16-21 in unified API (same `/api/output`, `/api/input`, `/api/curve-play` routes)
+- `/api/outputs` returns 22 channels when MK connected, 16 when not
+- Web UI creates 22 cards (MK cards hidden until connected), same full UI as PCA9685 cards
+- `sendJsonClose()` helper adds `Connection: close` to all JSON responses
+
+### Issues
+- AsyncTCP ack/rx timeouts still occur under heavy load (many sequences + slider movement + MK + PS4)
+- `/api/state` combined endpoint built but not yet wired to web UI JS (would eliminate multi-request polls)
+- PS4 controller not yet confirmed working with MK (BT radio time contention possible)
+- MK motor direction change responsiveness needs hardware verification
+
+### To-do
+- Wire `/api/state` to web UI JS (single request per poll cycle)
+- Test PS4 + MK simultaneous operation
+- Add upload_speed=115200 to platformio.ini
+- Phase 1: Implement ELRS input
+- Phase 2: Implement scripting engine
+- Phase 3: Implement Blockly visual editor
+
+### Ideas
+- Use Server-Sent Events (SSE) instead of polling for real-time output value updates
+- MK channels could support preset save/load alongside PCA9685 channels
+- Consider me-no-dev/ESPAsyncWebServer replacement with lighter HTTP server if TCP issues persist
+
+## Updated REST API Routes
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/api/state` | Combined: outputs + raw-inputs + freq (one request) |
+| GET | `/api/outputs` | All channel states (16 PCA + 6 MK when connected) |
+| POST | `/api/output` | Set single channel (ch 0-15=PCA, 16-21=MK) |
+| POST | `/api/input` | Set channel input source (ch 0-21) |
+| POST | `/api/curve-play` | Start curve playback (ch 0-21) |
+| POST | `/api/curve-stop` | Stop curve playback (ch 0-21) |
+| POST | `/api/pot-assign` | Assign pot to channel (ch 0-21) |
+| POST | `/api/mk-connect` | Connect/disconnect MK hub |
+| GET | `/` | Web UI (http://pwm.local) |
+
+## Updated Build Stats
+- RAM: ~18.8%, Flash: ~62.2%
+- No external BLE libraries needed (NimBLE/MouldKingino removed)

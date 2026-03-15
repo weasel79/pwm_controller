@@ -2,6 +2,7 @@
 #include "output_controller.h"
 #include "digital_input.h"
 #include "ps4_input.h"
+#include "mk_input.h"
 #include "web_ui.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
@@ -9,6 +10,7 @@
 #include <esp_wifi.h>
 #include <esp_coexist.h>
 #include <esp_event.h>
+#include <ESPmDNS.h>
 #include <LittleFS.h>
 
 #define PRESET_DIR "/presets"
@@ -37,10 +39,11 @@ static void _wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
 }
 
-void WiFiController::init(OutputController* outputCtrl, DigitalInput* digitalInput, PS4Input* ps4Input) {
+void WiFiController::init(OutputController* outputCtrl, DigitalInput* digitalInput, PS4Input* ps4Input, MkInput* mkInput) {
     _outputCtrl = outputCtrl;
     _digitalInput = digitalInput;
     _ps4Input = ps4Input;
+    _mkInput = mkInput;
     WiFi.onEvent(_wifiEventHandler);
     _setupWiFi();
     _setupRoutes();
@@ -65,6 +68,10 @@ void WiFiController::_setupWiFi() {
         if (WiFi.status() == WL_CONNECTED) {
             Serial.print("[WiFi] Connected, IP: ");
             Serial.println(WiFi.localIP());
+            if (MDNS.begin("pwm")) {
+                MDNS.addService("http", "tcp", WEB_SERVER_PORT);
+                Serial.println("[WiFi] mDNS: http://pwm.local");
+            }
         } else {
             Serial.println("[WiFi] STA connection failed, falling back to AP mode");
             WiFi.mode(WIFI_AP);
@@ -91,20 +98,91 @@ void WiFiController::_setupWiFi() {
     }
 }
 
+// Helper: send JSON with Connection: close to free TCP sockets faster
+static void sendJsonClose(AsyncWebServerRequest* req, int code, const String& json) {
+    AsyncWebServerResponse* resp = req->beginResponse(code, "application/json", json);
+    resp->addHeader("Connection", "close");
+    req->send(resp);
+}
+
 void WiFiController::_setupRoutes() {
     OutputController* sc = _outputCtrl;
     DigitalInput* di = _digitalInput;
     PS4Input* ps4 = _ps4Input;
+    MkInput* mk = _mkInput;
 
     // Serve Web UI
     _server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
         request->send_P(200, "text/html", WEB_UI_HTML);
     });
 
-    // GET /api/outputs - get all output channel states
-    _server.on("/api/outputs", HTTP_GET, [sc](AsyncWebServerRequest* request) {
+    // GET /api/state - combined endpoint: outputs + raw inputs in one request.
+    // Eliminates multiple concurrent HTTP requests that cause TCP socket exhaustion.
+    _server.on("/api/state", HTTP_GET, [sc, di, ps4, mk](AsyncWebServerRequest* request) {
+        JsonDocument doc;
+        // Outputs (PCA9685 + MK)
+        JsonArray outs = doc["outputs"].to<JsonArray>();
+        for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
+            JsonObject obj = outs.add<JsonObject>();
+            const OutputChannel& ch = sc->getChannel(i);
+            obj["angle"] = ch.currentValue;
+            obj["name"] = ch.name;
+            switch (ch.type) {
+                case OUTPUT_SERVO: obj["type"] = "servo"; break;
+                case OUTPUT_MOTOR: obj["type"] = "motor"; break;
+                case OUTPUT_LEGO:  obj["type"] = "lego";  break;
+                case OUTPUT_PWM:   obj["type"] = "pwm";   break;
+            }
+            obj["input"] = (uint8_t)ch.inputSource;
+            obj["pot"] = ch.potIndex;
+            obj["pwmMin"] = ch.pwmMin;
+            obj["pwmMax"] = ch.pwmMax;
+            obj["digPin"] = ch.digitalPin;
+            obj["digMode"] = ch.digitalMode;
+        }
+        if (mk && mk->isConnected()) {
+            static const char* MKN[] = {"MK A","MK B","MK C","MK D","MK E","MK F"};
+            for (uint8_t i = 0; i < NUM_MK_CHANNELS; i++) {
+                JsonObject obj = outs.add<JsonObject>();
+                obj["angle"] = mk->getValue(i);
+                obj["name"] = MKN[i];
+                obj["type"] = "motor";
+                obj["input"] = (uint8_t)mk->getInputSource(i);
+                obj["pot"] = mk->getPotIndex(i);
+                obj["pwmMin"] = 0; obj["pwmMax"] = 4095;
+                obj["digPin"] = 0; obj["digMode"] = 0;
+            }
+        }
+        // Raw inputs
+        JsonObject ps4obj = doc["ps4"].to<JsonObject>();
+        if (ps4) {
+            const PS4State& s = ps4->getState();
+            ps4obj["connected"] = s.connected;
+            ps4obj["lx"] = s.lx; ps4obj["ly"] = s.ly;
+            ps4obj["rx"] = s.rx; ps4obj["ry"] = s.ry;
+            ps4obj["l2"] = s.l2; ps4obj["r2"] = s.r2;
+            ps4obj["cross"] = s.cross; ps4obj["circle"] = s.circle;
+            ps4obj["square"] = s.square; ps4obj["triangle"] = s.triangle;
+            ps4obj["l1"] = s.l1; ps4obj["r1"] = s.r1;
+        } else {
+            ps4obj["connected"] = false;
+        }
+        JsonArray analog = doc["analog"].to<JsonArray>();
+        for (uint8_t i = 0; i < NUM_POTS; i++) analog.add(analogRead(POT_PINS[i]));
+        JsonArray digital = doc["digital"].to<JsonArray>();
+        for (uint8_t i = 0; i < NUM_POTS; i++) digital.add(di ? di->getPinState(i) : false);
+        // Global freq
+        doc["freq"] = sc->getGlobalFrequency();
+        String json;
+        serializeJson(doc, json);
+        sendJsonClose(request, 200, json);
+    });
+
+    // GET /api/outputs - get all output channel states (16 PCA + 6 MK when connected)
+    _server.on("/api/outputs", HTTP_GET, [sc, mk](AsyncWebServerRequest* request) {
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
+        // PCA9685 channels 0-15
         for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
             JsonObject obj = arr.add<JsonObject>();
             const OutputChannel& ch = sc->getChannel(i);
@@ -142,16 +220,55 @@ void WiFiController::_setupRoutes() {
             obj["digPin"] = ch.digitalPin;
             obj["digMode"] = ch.digitalMode;
         }
+        // MK channels 16-21 (only when connected)
+        if (mk && mk->isConnected()) {
+            static const char* MK_NAMES[] = {"MK A","MK B","MK C","MK D","MK E","MK F"};
+            for (uint8_t i = 0; i < NUM_MK_CHANNELS; i++) {
+                JsonObject obj = arr.add<JsonObject>();
+                obj["channel"] = NUM_OUTPUTS + i;
+                obj["angle"] = mk->getValue(i);
+                obj["name"] = MK_NAMES[i];
+                obj["type"] = "motor";
+                // Use same input source name mapping as PCA channels
+                InputSource mkSrc = mk->getInputSource(i);
+                const char* mkSrcName = "manual";
+                switch (mkSrc) {
+                    case INPUT_MANUAL: mkSrcName = "manual"; break;
+                    case INPUT_ENVELOPE: mkSrcName = "envelope"; break;
+                    case INPUT_POT: mkSrcName = "pot"; break;
+                    case INPUT_PS4_LX: mkSrcName = "ps4_lx"; break;
+                    case INPUT_PS4_LY: mkSrcName = "ps4_ly"; break;
+                    case INPUT_PS4_RX: mkSrcName = "ps4_rx"; break;
+                    case INPUT_PS4_RY: mkSrcName = "ps4_ry"; break;
+                    case INPUT_PS4_L2: mkSrcName = "ps4_l2"; break;
+                    case INPUT_PS4_R2: mkSrcName = "ps4_r2"; break;
+                    case INPUT_PS4_CROSS: mkSrcName = "ps4_cross"; break;
+                    case INPUT_PS4_CIRCLE: mkSrcName = "ps4_circle"; break;
+                    case INPUT_PS4_SQUARE: mkSrcName = "ps4_square"; break;
+                    case INPUT_PS4_TRIANGLE: mkSrcName = "ps4_triangle"; break;
+                    case INPUT_PS4_L1: mkSrcName = "ps4_l1"; break;
+                    case INPUT_PS4_R1: mkSrcName = "ps4_r1"; break;
+                    case INPUT_SEQUENCE: mkSrcName = "sequence"; break;
+                    case INPUT_DIGITAL: mkSrcName = "digital"; break;
+                }
+                obj["input"] = mkSrcName;
+                obj["pot"] = mk->getPotIndex(i);
+                obj["pwmMin"] = 0;
+                obj["pwmMax"] = 4095;
+                obj["digPin"] = 0;
+                obj["digMode"] = 0;
+            }
+        }
         String json;
         serializeJson(doc, json);
-        request->send(200, "application/json", json);
+        sendJsonClose(request, 200, json);
     });
 
-    // POST /api/output - set single output
+    // POST /api/output - set single output (ch 0-15 = PCA, 16-21 = MK)
     _server.on("/api/output", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
-        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+        [sc, mk](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
             JsonDocument doc;
             if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
                 request->send(400, "application/json", "{\"error\":\"invalid json\"}");
@@ -159,7 +276,11 @@ void WiFiController::_setupRoutes() {
             }
             uint8_t channel = doc["channel"] | 0;
             float angle = doc["angle"] | 90.0f;
-            sc->setValue(channel, angle);
+            if (channel >= NUM_OUTPUTS && mk) {
+                mk->setValue(channel - NUM_OUTPUTS, angle);
+            } else {
+                sc->setValue(channel, angle);
+            }
             request->send(200, "application/json", "{\"ok\":true}");
         }
     );
@@ -212,11 +333,11 @@ void WiFiController::_setupRoutes() {
         }
     );
 
-    // POST /api/input - set channel input source
+    // POST /api/input - set channel input source (ch 0-15 = PCA, 16-21 = MK)
     _server.on("/api/input", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
-        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+        [sc, mk](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
             JsonDocument doc;
             if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
                 request->send(400, "application/json", "{\"error\":\"invalid json\"}");
@@ -246,7 +367,11 @@ void WiFiController::_setupRoutes() {
                 request->send(400, "application/json", "{\"error\":\"invalid input\"}");
                 return;
             }
-            sc->setChannelInput(channel, src);
+            if (channel >= NUM_OUTPUTS && mk) {
+                mk->setInputSource(channel - NUM_OUTPUTS, src);
+            } else {
+                sc->setChannelInput(channel, src);
+            }
             request->send(200, "application/json", "{\"ok\":true}");
         }
     );
@@ -255,7 +380,7 @@ void WiFiController::_setupRoutes() {
     _server.on("/api/pot-assign", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
-        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+        [sc, mk](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
             JsonDocument doc;
             if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
                 request->send(400, "application/json", "{\"error\":\"invalid json\"}");
@@ -263,7 +388,11 @@ void WiFiController::_setupRoutes() {
             }
             uint8_t channel = doc["channel"] | 0;
             uint8_t pot = doc["pot"] | 0;
-            sc->setChannelPot(channel, pot);
+            if (channel >= NUM_OUTPUTS && mk) {
+                mk->setPotIndex(channel - NUM_OUTPUTS, pot);
+            } else {
+                sc->setChannelPot(channel, pot);
+            }
             request->send(200, "application/json", "{\"ok\":true}");
         }
     );
@@ -319,7 +448,7 @@ void WiFiController::_setupRoutes() {
         }
         String json;
         serializeJson(doc, json);
-        request->send(200, "application/json", json);
+        sendJsonClose(request, 200, json);
     });
 
     // GET /api/raw-inputs - get raw hardware input values (PS4, analog, digital)
@@ -365,7 +494,7 @@ void WiFiController::_setupRoutes() {
         }
         String json;
         serializeJson(doc, json);
-        request->send(200, "application/json", json);
+        sendJsonClose(request, 200, json);
     });
 
     // POST /api/global-freq - set global PWM frequency
@@ -387,7 +516,7 @@ void WiFiController::_setupRoutes() {
     // GET /api/global-freq - get current PWM frequency
     _server.on("/api/global-freq", HTTP_GET, [sc](AsyncWebServerRequest* request) {
         String json = "{\"freq\":" + String(sc->getGlobalFrequency()) + "}";
-        request->send(200, "application/json", json);
+        sendJsonClose(request, 200, json);
     });
 
     // POST /api/stop-all - stop all curve playback
@@ -489,7 +618,7 @@ void WiFiController::_setupRoutes() {
         }
         String json;
         serializeJson(doc, json);
-        request->send(200, "application/json", json);
+        sendJsonClose(request, 200, json);
     });
 
     // POST /api/seq-del - delete a saved sequence
@@ -538,7 +667,7 @@ void WiFiController::_setupRoutes() {
         }
         String json;
         serializeJson(doc, json);
-        request->send(200, "application/json", json);
+        sendJsonClose(request, 200, json);
     });
 
     // POST /api/preset-save
@@ -642,7 +771,7 @@ void WiFiController::_setupRoutes() {
     _server.on("/api/curve-play", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
-        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+        [sc, mk](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
             // Accumulate chunks for large payloads
             if (index == 0) {
                 request->_tempObject = malloc(total + 1);
@@ -685,7 +814,11 @@ void WiFiController::_setupRoutes() {
                 curve[i].a = p["a"] | 90.0f;
                 i++;
             }
-            sc->playCurve(channel, curve, count, duration, loop);
+            if (channel >= NUM_OUTPUTS && mk) {
+                mk->playCurve(channel - NUM_OUTPUTS, curve, count, duration, loop);
+            } else {
+                sc->playCurve(channel, curve, count, duration, loop);
+            }
             free(curve);
             request->send(200, "application/json", "{\"ok\":true}");
         }
@@ -695,14 +828,18 @@ void WiFiController::_setupRoutes() {
     _server.on("/api/curve-stop", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
-        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+        [sc, mk](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
             JsonDocument doc;
             if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
                 request->send(400, "application/json", "{\"error\":\"invalid json\"}");
                 return;
             }
             uint8_t channel = doc["channel"] | 0;
-            sc->stopCurve(channel);
+            if (channel >= NUM_OUTPUTS && mk) {
+                mk->stopCurve(channel - NUM_OUTPUTS);
+            } else {
+                sc->stopCurve(channel);
+            }
             request->send(200, "application/json", "{\"ok\":true}");
         }
     );
@@ -813,7 +950,7 @@ void WiFiController::_setupRoutes() {
         }
         String json;
         serializeJson(doc, json);
-        request->send(200, "application/json", json);
+        sendJsonClose(request, 200, json);
     });
 
     // POST /api/env-del - delete saved envelope
@@ -877,4 +1014,32 @@ void WiFiController::_setupRoutes() {
             }
         }
     );
+
+    // POST /api/mk-connect - connect or disconnect MK hub {action:"connect"|"disconnect"}
+    _server.on("/api/mk-connect", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        nullptr,
+        [mk](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+                request->send(400, "application/json", "{\"error\":\"invalid json\"}");
+                return;
+            }
+            const char* action = doc["action"] | "connect";
+            if (!mk) {
+                request->send(500, "application/json", "{\"error\":\"mk not available\"}");
+                return;
+            }
+            if (strcmp(action, "disconnect") == 0) {
+                mk->disconnect();
+            } else {
+                mk->connect();
+            }
+            String json = "{\"ok\":true,\"connected\":";
+            json += mk->isConnected() ? "true" : "false";
+            json += "}";
+            sendJsonClose(request, 200, json);
+        }
+    );
+
 }

@@ -47,6 +47,11 @@ static const uint8_t POT_PINS[NUM_POTS] = {34, 35, 32, 33};
 #define PS4_CONTROLLER_MAC  "1a:2b:3c:01:01:01"
 #define PS4_UPDATE_MS       20
 
+// ---- MouldKing BLE Motor ----
+#define NUM_MK_CHANNELS  6          // MK 6.0: channels A-F
+#define MK_CONNECT_MS    3000       // BLE connect broadcast duration
+#define MK_UPDATE_MS     50         // Min interval between BLE motor updates
+
 // ---- Logging ----
 // 0=ERROR, 1=INFO, 2=DEBUG (verbose traces)
 #define LOG_LEVEL           1

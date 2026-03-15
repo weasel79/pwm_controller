@@ -43,8 +43,19 @@ void DigitalInput::update() {
     if (now - _lastUpdateMs < UPDATE_MS) return;
     _lastUpdateMs = now;
 
-    // Debounce all pins
+    // Build set of pins actually used by digital-input channels
+    bool pinUsed[MAX_PINS] = {};
+    if (_outputCtrl) {
+        for (uint8_t ch = 0; ch < NUM_OUTPUTS; ch++) {
+            const auto& oc = _outputCtrl->getChannel(ch);
+            if (oc.inputSource == INPUT_DIGITAL && oc.digitalPin < MAX_PINS)
+                pinUsed[oc.digitalPin] = true;
+        }
+    }
+
+    // Debounce only pins that are assigned to a digital-input channel
     for (uint8_t i = 0; i < MAX_PINS; i++) {
+        if (!pinUsed[i]) continue;
         bool raw = _reader->readPin(i);
         if (raw != _lastRaw[i]) {
             _lastChange[i] = now;
