@@ -1,4 +1,4 @@
-# 🔧 servo-geloet-esp32
+# 🔧 pwm_controller
 
 A 16-channel output controller for servos, motors, and LEDs running on an ESP32 + PCA9685.
 Ships with a sleek dark-themed web UI, PS4 controller support, potentiometer inputs,

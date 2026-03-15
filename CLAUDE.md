@@ -1,4 +1,4 @@
-# Universal PWM Control (servo-geloet-esp32)
+# Universal PWM Control (pwm_controller)
 
 ## Project Overview
 ESP32 + PCA9685 16-channel PWM output controller with web UI, PS4 controller input, analog/digital inputs, envelope/sequence playback, and preset system.
