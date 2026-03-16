@@ -222,3 +222,41 @@ to presets. Implemented TCP watchdog, compact poll endpoint, and fetch abort tim
 - External web app hosted on PC for advanced scripting/Blockly (uses REST API directly)
 - Move to ESP32-S3 for more heap/flash and better WiFi
 - WebSocket instead of REST for real-time bidirectional communication
+
+---
+
+## Session — 2026-03-16 (cont.) — PS4 crash fix, code cleanup, WiFi config UI
+
+### Summary
+Fixed PS4 boot crash (WiFi STA must init AFTER BT), cleaned up duplicated code,
+added web-based WiFi network configuration with LittleFS persistence.
+
+### Key findings
+- **PS4 crash root cause: WiFi STA init before BT** — `esp_bluedroid_init()` crashes with `StoreProhibited` (memset on NULL) when WiFi STA is already connected. Fix: init PS4+MK BEFORE WiFi. Confirmed by AP-only mode working perfectly.
+- **Init order matters**: PCA9685 → Digital → btStop cleanup → **PS4 → MK** → WiFi → Analog
+- **`vQueueDelete` crash on soft reboot** — after a crash+reboot, BT controller has stale state. Fix: `btStop()` before PS4 init if `btStarted()` is true.
+- **patch_ps4lib.py was accumulating comments** — each build added another `// PATCHED` prefix to the already-patched line, eventually 68x nested. Fix: regex replacement with marker check for idempotency.
+- **ArduinoJson v7 deprecation**: `containsKey()` → `obj[key].is<T>()` for key existence check
+- **Volatile `++` deprecated in C++20**: `g_httpReqCount++` → `g_httpReqCount = g_httpReqCount + 1`
+
+### Architecture changes
+- **Shared `inputSourceName()` / `inputSourceFromName()`** in `output_controller.h` — replaces 5 duplicate switch/array blocks across 2 files (~80 lines removed)
+- **Removed unused `PinReader` abstract class** — `DigitalInput` now reads GPIO directly
+- **Removed empty `_updateFrequency()` stub**
+- **WiFi config via LittleFS** — `/wifi.json` stores `{"ssid":"...","pass":"..."}`, read at boot
+- **`/api/wifi-config`** GET returns current SSID, POST saves + reboots
+- **Web UI WiFi Settings section** — SSID + password inputs, "Save & Reboot" button
+
+### Issues
+- AsyncTCP timeouts still occur under heavy PS4+MK+WiFi load
+- Preset load UI doesn't always update dropdowns (page reload workaround)
+
+### To-do
+- ELRS RC input (Phase 1)
+- Scripting engine (Phase 2)
+- Blockly visual editor (Phase 3)
+- Consider replacing ESPAsyncWebServer
+
+### Ideas
+- WiFi scan endpoint to show available networks in dropdown
+- Captive portal in AP mode for automatic WiFi config redirect

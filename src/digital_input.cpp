@@ -1,29 +1,16 @@
 #include "digital_input.h"
 #include "output_controller.h"
 
-void GpioPinReader::init() {
+void DigitalInput::init(OutputController* outputCtrl) {
+    _outputCtrl = outputCtrl;
+    // Configure GPIO pins for digital reading
     for (uint8_t i = 0; i < NUM_POTS; i++) {
-        // GPIO 34-35 have no internal pullup; GPIO 32-33 do
+        // GPIO 34-35 are input-only with no internal pullup
         if (POT_PINS[i] >= 34) {
             pinMode(POT_PINS[i], INPUT);
         } else {
             pinMode(POT_PINS[i], INPUT_PULLUP);
         }
-    }
-}
-
-bool GpioPinReader::readPin(uint8_t index) {
-    if (index >= NUM_POTS) return false;
-    return digitalRead(POT_PINS[index]) == HIGH;
-}
-
-void DigitalInput::init(OutputController* outputCtrl, PinReader* reader) {
-    _outputCtrl = outputCtrl;
-    if (reader) {
-        _reader = reader;
-    } else {
-        _defaultReader.init();
-        _reader = &_defaultReader;
     }
     for (uint8_t i = 0; i < MAX_PINS; i++) {
         _pinState[i] = false;
@@ -56,7 +43,7 @@ void DigitalInput::update() {
     // Debounce only pins that are assigned to a digital-input channel
     for (uint8_t i = 0; i < MAX_PINS; i++) {
         if (!pinUsed[i]) continue;
-        bool raw = _reader->readPin(i);
+        bool raw = (digitalRead(POT_PINS[i]) == HIGH);
         if (raw != _lastRaw[i]) {
             _lastChange[i] = now;
             _lastRaw[i] = raw;

@@ -52,11 +52,30 @@ void WiFiController::init(OutputController* outputCtrl, DigitalInput* digitalInp
 }
 
 void WiFiController::_setupWiFi() {
+    // Load WiFi credentials from LittleFS if available, else use config.h defaults.
+    // This allows changing WiFi network via the web UI without recompiling.
+    String ssid = WIFI_SSID;
+    String pass = WIFI_PASSWORD;
+    if (LittleFS.exists("/wifi.json")) {
+        File f = LittleFS.open("/wifi.json", "r");
+        if (f) {
+            JsonDocument wdoc;
+            if (deserializeJson(wdoc, f) == DeserializationError::Ok) {
+                const char* s = wdoc["ssid"];
+                const char* p = wdoc["pass"];
+                if (s && strlen(s) > 0) { ssid = s; pass = p ? p : ""; }
+            }
+            f.close();
+        }
+    }
+    // Store active SSID for the web UI status display
+    _activeSSID = ssid;
+
     if (WIFI_STA_MODE) {
         WiFi.mode(WIFI_STA);
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        WiFi.begin(ssid.c_str(), pass.c_str());
         Serial.print("[WiFi] Connecting to ");
-        Serial.print(WIFI_SSID);
+        Serial.print(ssid);
 
         unsigned long start = millis();
         while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
@@ -104,7 +123,7 @@ extern volatile uint32_t g_httpSetCount;
 
 // Helper: send JSON with Connection: close to free TCP sockets faster
 static void sendJsonClose(AsyncWebServerRequest* req, int code, const String& json) {
-    g_httpReqCount++;
+    g_httpReqCount = g_httpReqCount + 1;
     AsyncWebServerResponse* resp = req->beginResponse(code, "application/json", json);
     resp->addHeader("Cache-Control", "no-store");
     req->send(resp);
@@ -165,25 +184,7 @@ void WiFiController::_setupRoutes() {
                 case OUTPUT_LEGO:  obj["type"] = "lego";  break;
                 case OUTPUT_PWM:      obj["type"] = "pwm";      break;
             }
-            switch (ch.inputSource) {
-                case INPUT_MANUAL:     obj["input"] = "manual";     break;
-                case INPUT_ENVELOPE:   obj["input"] = "envelope";   break;
-                case INPUT_POT:        obj["input"] = "pot";        break;
-                case INPUT_PS4_LX:     obj["input"] = "ps4_lx";     break;
-                case INPUT_PS4_LY:     obj["input"] = "ps4_ly";     break;
-                case INPUT_PS4_RX:     obj["input"] = "ps4_rx";     break;
-                case INPUT_PS4_RY:     obj["input"] = "ps4_ry";     break;
-                case INPUT_PS4_L2:     obj["input"] = "ps4_l2";     break;
-                case INPUT_PS4_R2:     obj["input"] = "ps4_r2";     break;
-                case INPUT_PS4_CROSS:  obj["input"] = "ps4_cross";  break;
-                case INPUT_PS4_CIRCLE: obj["input"] = "ps4_circle"; break;
-                case INPUT_PS4_SQUARE: obj["input"] = "ps4_square"; break;
-                case INPUT_PS4_TRIANGLE: obj["input"] = "ps4_triangle"; break;
-                case INPUT_PS4_L1:     obj["input"] = "ps4_l1";     break;
-                case INPUT_PS4_R1:     obj["input"] = "ps4_r1";     break;
-                case INPUT_SEQUENCE:   obj["input"] = "sequence";   break;
-                case INPUT_DIGITAL:    obj["input"] = "digital";    break;
-            }
+            obj["input"] = inputSourceName(ch.inputSource);
             obj["pot"] = ch.potIndex;
             obj["pwmMin"] = ch.pwmMin;
             obj["pwmMax"] = ch.pwmMax;
@@ -199,29 +200,7 @@ void WiFiController::_setupRoutes() {
                 obj["angle"] = mk->getValue(i);
                 obj["name"] = MK_NAMES[i];
                 obj["type"] = "motor";
-                // Use same input source name mapping as PCA channels
-                InputSource mkSrc = mk->getInputSource(i);
-                const char* mkSrcName = "manual";
-                switch (mkSrc) {
-                    case INPUT_MANUAL: mkSrcName = "manual"; break;
-                    case INPUT_ENVELOPE: mkSrcName = "envelope"; break;
-                    case INPUT_POT: mkSrcName = "pot"; break;
-                    case INPUT_PS4_LX: mkSrcName = "ps4_lx"; break;
-                    case INPUT_PS4_LY: mkSrcName = "ps4_ly"; break;
-                    case INPUT_PS4_RX: mkSrcName = "ps4_rx"; break;
-                    case INPUT_PS4_RY: mkSrcName = "ps4_ry"; break;
-                    case INPUT_PS4_L2: mkSrcName = "ps4_l2"; break;
-                    case INPUT_PS4_R2: mkSrcName = "ps4_r2"; break;
-                    case INPUT_PS4_CROSS: mkSrcName = "ps4_cross"; break;
-                    case INPUT_PS4_CIRCLE: mkSrcName = "ps4_circle"; break;
-                    case INPUT_PS4_SQUARE: mkSrcName = "ps4_square"; break;
-                    case INPUT_PS4_TRIANGLE: mkSrcName = "ps4_triangle"; break;
-                    case INPUT_PS4_L1: mkSrcName = "ps4_l1"; break;
-                    case INPUT_PS4_R1: mkSrcName = "ps4_r1"; break;
-                    case INPUT_SEQUENCE: mkSrcName = "sequence"; break;
-                    case INPUT_DIGITAL: mkSrcName = "digital"; break;
-                }
-                obj["input"] = mkSrcName;
+                obj["input"] = inputSourceName(mk->getInputSource(i));
                 obj["pot"] = mk->getPotIndex(i);
                 obj["pwmMin"] = 0;
                 obj["pwmMax"] = 4095;
@@ -246,7 +225,7 @@ void WiFiController::_setupRoutes() {
             }
             uint8_t channel = doc["channel"] | 0;
             float angle = doc["angle"] | 90.0f;
-            g_httpSetCount++;
+            g_httpSetCount = g_httpSetCount + 1;
             if (channel >= NUM_OUTPUTS && mk) {
                 mk->setValue(channel - NUM_OUTPUTS, angle);
             } else {
@@ -315,29 +294,7 @@ void WiFiController::_setupRoutes() {
                 return;
             }
             uint8_t channel = doc["channel"] | 0;
-            const char* inStr = doc["input"] | "";
-            InputSource src;
-            if (strcmp(inStr, "manual") == 0) src = INPUT_MANUAL;
-            else if (strcmp(inStr, "envelope") == 0) src = INPUT_ENVELOPE;
-            else if (strcmp(inStr, "pot") == 0) src = INPUT_POT;
-            else if (strcmp(inStr, "ps4_lx") == 0) src = INPUT_PS4_LX;
-            else if (strcmp(inStr, "ps4_ly") == 0) src = INPUT_PS4_LY;
-            else if (strcmp(inStr, "ps4_rx") == 0) src = INPUT_PS4_RX;
-            else if (strcmp(inStr, "ps4_ry") == 0) src = INPUT_PS4_RY;
-            else if (strcmp(inStr, "ps4_l2") == 0) src = INPUT_PS4_L2;
-            else if (strcmp(inStr, "ps4_r2") == 0) src = INPUT_PS4_R2;
-            else if (strcmp(inStr, "ps4_cross") == 0) src = INPUT_PS4_CROSS;
-            else if (strcmp(inStr, "ps4_circle") == 0) src = INPUT_PS4_CIRCLE;
-            else if (strcmp(inStr, "ps4_square") == 0) src = INPUT_PS4_SQUARE;
-            else if (strcmp(inStr, "ps4_triangle") == 0) src = INPUT_PS4_TRIANGLE;
-            else if (strcmp(inStr, "ps4_l1") == 0) src = INPUT_PS4_L1;
-            else if (strcmp(inStr, "ps4_r1") == 0) src = INPUT_PS4_R1;
-            else if (strcmp(inStr, "sequence") == 0) src = INPUT_SEQUENCE;
-            else if (strcmp(inStr, "digital") == 0) src = INPUT_DIGITAL;
-            else {
-                request->send(400, "application/json", "{\"error\":\"invalid input\"}");
-                return;
-            }
+            InputSource src = inputSourceFromName(doc["input"] | "");
             if (channel >= NUM_OUTPUTS && mk) {
                 mk->setInputSource(channel - NUM_OUTPUTS, src);
             } else {
@@ -662,12 +619,10 @@ void WiFiController::_setupRoutes() {
             sc->getPresetJson(pcaJson);
             deserializeJson(preset, pcaJson);
             if (mk) {
-                static const char* SN[] = {"manual","envelope","pot","ps4_lx","ps4_ly","ps4_rx","ps4_ry","ps4_l2","ps4_r2","ps4_cross","ps4_circle","ps4_square","ps4_tri","ps4_l1","ps4_r1","sequence","digital"};
                 JsonArray mkArr = preset["mk"].to<JsonArray>();
                 for (uint8_t i = 0; i < NUM_MK_CHANNELS; i++) {
                     JsonObject obj = mkArr.add<JsonObject>();
-                    InputSource src = mk->getInputSource(i);
-                    obj["input"] = (src < 17) ? SN[src] : "manual";
+                    obj["input"] = inputSourceName(mk->getInputSource(i));
                     obj["value"] = (int)roundf(mk->getValue(i));
                     obj["pot"] = mk->getPotIndex(i);
                 }
@@ -722,18 +677,12 @@ void WiFiController::_setupRoutes() {
                 deserializeJson(preset, buf, fLen);
                 JsonArray mkArr = preset["mk"];
                 if (!mkArr.isNull()) {
-                    static const char* SN[] = {"manual","envelope","pot","ps4_lx","ps4_ly","ps4_rx","ps4_ry","ps4_l2","ps4_r2","ps4_cross","ps4_circle","ps4_square","ps4_tri","ps4_l1","ps4_r1","sequence","digital"};
                     uint8_t mi = 0;
                     for (JsonObject obj : mkArr) {
                         if (mi >= NUM_MK_CHANNELS) break;
                         mk->setValue(mi, (float)(obj["value"] | 90));
                         mk->setPotIndex(mi, obj["pot"] | 0);
-                        const char* inStr = obj["input"] | "manual";
-                        InputSource src = INPUT_MANUAL;
-                        for (int s = 0; s < 17; s++) {
-                            if (strcmp(inStr, SN[s]) == 0) { src = (InputSource)s; break; }
-                        }
-                        mk->setInputSource(mi, src);
+                        mk->setInputSource(mi, inputSourceFromName(obj["input"] | "manual"));
                         mi++;
                     }
                 }
@@ -1020,6 +969,46 @@ void WiFiController::_setupRoutes() {
                     Update.printError(Serial);
                 }
             }
+        }
+    );
+
+    // GET /api/wifi-config - returns current SSID (password not exposed)
+    String* activeSSID = &_activeSSID;
+    _server.on("/api/wifi-config", HTTP_GET,
+        [activeSSID](AsyncWebServerRequest* request) {
+            String json = "{\"ssid\":\"" + *activeSSID + "\"}";
+            request->send(200, "application/json", json);
+        }
+    );
+
+    // POST /api/wifi-config - save new WiFi credentials and reboot
+    // Body: {"ssid":"network_name","pass":"password"}
+    _server.on("/api/wifi-config", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        nullptr,
+        [](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+                request->send(400, "application/json", "{\"error\":\"invalid json\"}");
+                return;
+            }
+            const char* ssid = doc["ssid"] | "";
+            if (strlen(ssid) == 0) {
+                request->send(400, "application/json", "{\"error\":\"missing ssid\"}");
+                return;
+            }
+            // Write credentials to LittleFS
+            File f = LittleFS.open("/wifi.json", "w");
+            if (!f) {
+                request->send(500, "application/json", "{\"error\":\"file write failed\"}");
+                return;
+            }
+            serializeJson(doc, f);
+            f.close();
+            Serial.printf("[WiFi] Saved new config: SSID=%s\n", ssid);
+            request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Rebooting...\"}");
+            delay(1000);
+            ESP.restart();
         }
     );
 

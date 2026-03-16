@@ -35,19 +35,24 @@ void setup() {
     // Initialize output controller (PCA9685)
     outputController.init();
 
-    // Initialize digital inputs (before WiFi so pointer is ready)
+    // Initialize digital inputs
     digitalInput.init(&outputController);
 
-    // Initialize WiFi + Web UI + REST API (pass mkInput pointer for API routes)
-    wifiController.init(&outputController, &digitalInput, &ps4Input, &mkInput);
+    // Clean BT state in case of soft reboot (watchdog/crash leaves stale BT controller).
+    // Without this, esp_spp_init() tries to delete a NULL queue → vQueueDelete assert.
+    if (btStarted()) {
+        Serial.println("[BT] Cleaning stale BT state from soft reboot");
+        btStop();
+        delay(100);
+    }
 
-    // Initialize PS4 FIRST — it sets the BT MAC, calls btStart(), and inits Bluedroid.
-    // MK then adds BLE GAP on top of the already-running Bluedroid stack.
+    // Initialize PS4 + MK BEFORE WiFi — BT controller init crashes if WiFi STA
+    // is already connected (radio contention during Bluedroid init).
     ps4Input.init(&outputController);
-
-    // Initialize MouldKing BLE (uses existing Bluedroid stack).
-    // Does NOT auto-connect — use the web UI "Connect MK" button to connect on demand.
     mkInput.init(&ps4Input);
+
+    // Initialize WiFi + Web UI + REST API (after BT is fully initialized)
+    wifiController.init(&outputController, &digitalInput, &ps4Input, &mkInput);
 
     // Initialize analog inputs
     analogInput.init(&outputController);
@@ -91,8 +96,11 @@ void loop() {
                       mkInput.isConnected() ? "Y" : "N");
 
         // TCP watchdog: if req=0 for 4 consecutive cycles (20s), reboot.
-        // This recovers from permanently stuck TCP connections.
-        if (reqDelta == 0 && setDelta == 0 && now > 30000) {
+        // Only trigger when WiFi has clients (STA=connected to router, AP=client joined).
+        // Prevents reboot loop when in AP mode with nobody connected yet.
+        bool hasWifiClients = (WiFi.getMode() == WIFI_STA && WiFi.isConnected())
+                           || (WiFi.getMode() == WIFI_AP && WiFi.softAPgetStationNum() > 0);
+        if (reqDelta == 0 && setDelta == 0 && now > 30000 && hasWifiClients) {
             _zeroReqStreak++;
             if (_zeroReqStreak >= 4) {
                 Serial.println("[WATCHDOG] Web server stuck (req=0 for 20s) — rebooting!");

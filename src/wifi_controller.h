@@ -20,6 +20,7 @@ private:
     DigitalInput* _digitalInput = nullptr;
     PS4Input* _ps4Input = nullptr;
     MkInput* _mkInput = nullptr;
+    String _activeSSID;  // Current WiFi SSID (from /wifi.json or config.h default)
 
     void _setupWiFi();
     void _setupRoutes();

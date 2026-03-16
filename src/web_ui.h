@@ -170,6 +170,15 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
   <ul class="seq-list" id="presetList"><li>Loading...</li></ul>
 </div>
 <div class="ota-section">
+  <h3>WiFi Settings</h3>
+  <div class="ota-form">
+    <label style="font-size:13px;">SSID: <input type="text" id="wifiSSID" maxlength="32" style="width:140px;background:#0f3460;color:#eee;border:1px solid #1a3a5c;border-radius:4px;padding:4px 6px;font-size:13px;"></label>
+    <label style="font-size:13px;">Password: <input type="password" id="wifiPass" maxlength="63" style="width:140px;background:#0f3460;color:#eee;border:1px solid #1a3a5c;border-radius:4px;padding:4px 6px;font-size:13px;"></label>
+    <button class="btn-ota" onclick="wifiSave()">Save &amp; Reboot</button>
+    <span id="wifiStatus" style="font-size:13px;color:#aaa;"></span>
+  </div>
+</div>
+<div class="ota-section">
   <h3>Firmware Update</h3>
   <div class="ota-form">
     <input type="file" id="otaFile" accept=".bin">
@@ -1512,6 +1521,26 @@ function otaUpload() {
     btn.disabled = false;
   };
   xhr.send(form);
+}
+
+// --- WiFi config ---
+// Load current SSID into the input field on page load
+fetch('/api/wifi-config').then(function(r){return r.json();}).then(function(d){
+  if(d.ssid) document.getElementById('wifiSSID').value = d.ssid;
+}).catch(function(){});
+
+function wifiSave() {
+  var ssid = document.getElementById('wifiSSID').value.trim();
+  var pass = document.getElementById('wifiPass').value;
+  var st = document.getElementById('wifiStatus');
+  if (!ssid) { st.textContent = 'Enter an SSID'; return; }
+  st.textContent = 'Saving...';
+  fetch('/api/wifi-config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ssid:ssid, pass:pass})
+  }).then(function(r){return r.json();}).then(function(d){
+    st.textContent = d.ok ? 'Saved! Rebooting...' : (d.error || 'Failed');
+  }).catch(function(){ st.textContent = 'Connection lost (rebooting)'; });
 }
 
 // --- Raw input polling for live value display ---

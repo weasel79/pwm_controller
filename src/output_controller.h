@@ -24,6 +24,29 @@ enum InputSource : uint8_t {
     INPUT_DIGITAL    = 16,
 };
 
+// Shared lookup: InputSource enum value → JSON string name.
+// Used by API routes, preset save/load, and diagnostics.
+inline const char* inputSourceName(InputSource s) {
+    static const char* NAMES[] = {
+        "manual","envelope","pot","ps4_lx","ps4_ly","ps4_rx","ps4_ry",
+        "ps4_l2","ps4_r2","ps4_cross","ps4_circle","ps4_square",
+        "ps4_triangle","ps4_l1","ps4_r1","sequence","digital"
+    };
+    return (s <= INPUT_DIGITAL) ? NAMES[s] : "?";
+}
+
+// Shared reverse lookup: JSON string name → InputSource enum value.
+// Returns INPUT_MANUAL if name is not recognized.
+inline InputSource inputSourceFromName(const char* name) {
+    for (uint8_t i = 0; i <= INPUT_DIGITAL; i++) {
+        if (strcmp(name, inputSourceName((InputSource)i)) == 0)
+            return (InputSource)i;
+    }
+    // Legacy compat: old presets used "ps4_tri" instead of "ps4_triangle"
+    if (strcmp(name, "ps4_tri") == 0) return INPUT_PS4_TRIANGLE;
+    return INPUT_MANUAL;
+}
+
 enum OutputType : uint8_t {
     OUTPUT_SERVO = 0,   // Standard servo: 500-2500us pulse, 0-180 = angle
     OUTPUT_MOTOR = 1,   // DC motor: full PWM duty cycle, 0-180 = speed %
@@ -93,6 +116,5 @@ private:
     uint8_t _smoothSteps = 0; // 0 = instant
     uint16_t _currentFreqHz = OUTPUT_FREQ_HZ;
     void _writePWM(uint8_t channel, float value);
-    void _updateFrequency();
     float _interpolateCurve(uint8_t channel, float t) const;
 };

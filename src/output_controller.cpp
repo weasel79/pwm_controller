@@ -3,19 +3,7 @@
 #include <ArduinoJson.h>
 #include <math.h>
 
-static const char* _inputSourceName(InputSource s) {
-    switch (s) {
-        case INPUT_MANUAL: return "manual"; case INPUT_ENVELOPE: return "envelope";
-        case INPUT_POT: return "pot"; case INPUT_PS4_LX: return "ps4_lx";
-        case INPUT_PS4_LY: return "ps4_ly"; case INPUT_PS4_RX: return "ps4_rx";
-        case INPUT_PS4_RY: return "ps4_ry"; case INPUT_PS4_L2: return "ps4_l2";
-        case INPUT_PS4_R2: return "ps4_r2"; case INPUT_PS4_CROSS: return "ps4_cross";
-        case INPUT_PS4_CIRCLE: return "ps4_circle"; case INPUT_PS4_SQUARE: return "ps4_square";
-        case INPUT_PS4_TRIANGLE: return "ps4_tri"; case INPUT_PS4_L1: return "ps4_l1";
-        case INPUT_PS4_R1: return "ps4_r1"; case INPUT_SEQUENCE: return "sequence";
-        case INPUT_DIGITAL: return "digital"; default: return "?";
-    }
-}
+// InputSource name lookup is now shared via inputSourceName() in output_controller.h
 
 void OutputController::init() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -68,7 +56,7 @@ void OutputController::setValue(uint8_t channel, float value) {
         _lastTraceMs[channel] = now;
         Serial.printf("[%lu] SET -> ch%d: %.1f -> %.1f (src=%s)\n",
                       now, channel, oldVal, value,
-                      _inputSourceName(_channels[channel].inputSource));
+                      inputSourceName(_channels[channel].inputSource));
     }
 #endif
 }
@@ -118,7 +106,7 @@ void OutputController::setChannelType(uint8_t channel, OutputType type) {
         _channels[channel].pwmMin = MOTOR_DEFAULT_PWM_MIN;
         _channels[channel].pwmMax = MOTOR_DEFAULT_PWM_MAX;
     }
-    _updateFrequency();
+
 }
 
 void OutputController::setChannelInput(uint8_t channel, InputSource src) {
@@ -136,7 +124,7 @@ void OutputController::setChannelInput(uint8_t channel, InputSource src) {
     }
 #if LOG_LEVEL >= 1
     Serial.printf("[%lu] API -> ch%d: input %s -> %s\n",
-                  millis(), channel, _inputSourceName(old), _inputSourceName(src));
+                  millis(), channel, inputSourceName(old), inputSourceName(src));
 #endif
 }
 
@@ -238,7 +226,7 @@ void OutputController::getPresetJson(String& out) const {
             case OUTPUT_LEGO:     obj["type"] = "lego";    break;
             case OUTPUT_PWM:      obj["type"] = "pwm";     break;
         }
-        obj["input"] = _inputSourceName(ch.inputSource);
+        obj["input"] = inputSourceName(ch.inputSource);
         obj["value"] = (int)roundf(ch.currentValue);
         obj["name"] = ch.name;
         obj["pwmMin"] = ch.pwmMin;
@@ -267,32 +255,15 @@ bool OutputController::applyPresetJson(const uint8_t* data, size_t len) {
         else if (strcmp(typeStr, "lego") == 0) setChannelType(i, OUTPUT_LEGO);
         else if (strcmp(typeStr, "pwm") == 0) setChannelType(i, OUTPUT_PWM);
 
-        // Input source
-        const char* inStr = obj["input"] | "manual";
-        if (strcmp(inStr, "manual") == 0) setChannelInput(i, INPUT_MANUAL);
-        else if (strcmp(inStr, "envelope") == 0) setChannelInput(i, INPUT_ENVELOPE);
-        else if (strcmp(inStr, "pot") == 0) setChannelInput(i, INPUT_POT);
-        else if (strcmp(inStr, "ps4_lx") == 0) setChannelInput(i, INPUT_PS4_LX);
-        else if (strcmp(inStr, "ps4_ly") == 0) setChannelInput(i, INPUT_PS4_LY);
-        else if (strcmp(inStr, "ps4_rx") == 0) setChannelInput(i, INPUT_PS4_RX);
-        else if (strcmp(inStr, "ps4_ry") == 0) setChannelInput(i, INPUT_PS4_RY);
-        else if (strcmp(inStr, "ps4_l2") == 0) setChannelInput(i, INPUT_PS4_L2);
-        else if (strcmp(inStr, "ps4_r2") == 0) setChannelInput(i, INPUT_PS4_R2);
-        else if (strcmp(inStr, "ps4_cross") == 0) setChannelInput(i, INPUT_PS4_CROSS);
-        else if (strcmp(inStr, "ps4_circle") == 0) setChannelInput(i, INPUT_PS4_CIRCLE);
-        else if (strcmp(inStr, "ps4_square") == 0) setChannelInput(i, INPUT_PS4_SQUARE);
-        else if (strcmp(inStr, "ps4_tri") == 0) setChannelInput(i, INPUT_PS4_TRIANGLE);
-        else if (strcmp(inStr, "ps4_l1") == 0) setChannelInput(i, INPUT_PS4_L1);
-        else if (strcmp(inStr, "ps4_r1") == 0) setChannelInput(i, INPUT_PS4_R1);
-        else if (strcmp(inStr, "sequence") == 0) setChannelInput(i, INPUT_SEQUENCE);
-        else if (strcmp(inStr, "digital") == 0) setChannelInput(i, INPUT_DIGITAL);
+        // Input source (inputSourceFromName handles "ps4_tri" legacy compat)
+        setChannelInput(i, inputSourceFromName(obj["input"] | "manual"));
 
         // Value, name, range, pot
         setValue(i, (float)(obj["value"] | 90));
         if (obj["name"]) setChannelName(i, obj["name"]);
-        if (obj.containsKey("pwmMin") && obj.containsKey("pwmMax")) {
+        if (obj["pwmMin"].is<int>() && obj["pwmMax"].is<int>()) {
             setChannelRange(i, obj["pwmMin"] | SERVO_DEFAULT_PWM_MIN, obj["pwmMax"] | SERVO_DEFAULT_PWM_MAX);
-        } else if (obj.containsKey("min") && obj.containsKey("max")) {
+        } else if (obj["min"].is<int>() && obj["max"].is<int>()) {
             // Backward compat: convert old microsecond values to ticks
             uint16_t minUs = obj["min"] | OUTPUT_DEFAULT_MIN_US;
             uint16_t maxUs = obj["max"] | OUTPUT_DEFAULT_MAX_US;
@@ -338,7 +309,4 @@ void OutputController::setGlobalFrequency(uint16_t freqHz) {
     }
 }
 
-void OutputController::_updateFrequency() {
-    // Kept for API compat — frequency is now set via setGlobalFrequency()
-}
 
