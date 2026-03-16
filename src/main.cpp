@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <LittleFS.h>
-#include <esp_mac.h>
 
 #include "config.h"
 #include "output_controller.h"
@@ -22,20 +21,6 @@ void setup() {
     delay(500);
     Serial.println("\n=== Universal PWM Control Starting ===");
 
-    // Set BT MAC address early, before any BT init (MK or PS4).
-    // PS4 controller is paired to this MAC via SixAxis Pair Tool.
-    // esp_base_mac_addr_set must be called before btStart().
-    {
-        uint8_t mac[6];
-        sscanf(PS4_CONTROLLER_MAC, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
-        uint8_t baseMac[6];
-        memcpy(baseMac, mac, 6);
-        baseMac[5] -= 2;  // BT MAC = base MAC + 2
-        esp_base_mac_addr_set(baseMac);
-        Serial.printf("[BT] Base MAC set for PS4: %s\n", PS4_CONTROLLER_MAC);
-    }
-
     // Initialize LittleFS
     if (!LittleFS.begin(true)) {
         Serial.println("[FS] LittleFS mount failed!");
@@ -56,12 +41,13 @@ void setup() {
     // Initialize WiFi + Web UI + REST API (pass mkInput pointer for API routes)
     wifiController.init(&outputController, &digitalInput, &ps4Input, &mkInput);
 
-    // Initialize MouldKing BLE motor controller (Bluedroid BLE + 3s connect broadcast)
-    mkInput.init(&ps4Input);
-    mkInput.connect();
-
-    // Initialize PS4 controller (Bluetooth Classic, after MK connect completes)
+    // Initialize PS4 FIRST — it sets the BT MAC, calls btStart(), and inits Bluedroid.
+    // MK then adds BLE GAP on top of the already-running Bluedroid stack.
     ps4Input.init(&outputController);
+
+    // Initialize MouldKing BLE (uses existing Bluedroid stack).
+    // Does NOT auto-connect — use the web UI "Connect MK" button to connect on demand.
+    mkInput.init(&ps4Input);
 
     // Initialize analog inputs
     analogInput.init(&outputController);
@@ -72,6 +58,10 @@ void setup() {
     Serial.println("=== Universal PWM Control Ready ===\n");
 }
 
+// Diagnostics counters (updated by wifi_controller via extern)
+volatile uint32_t g_httpReqCount = 0;
+volatile uint32_t g_httpSetCount = 0;  // /api/output POST count
+
 void loop() {
     ps4Input.update();
     analogInput.update();
@@ -79,20 +69,43 @@ void loop() {
     outputController.update();
     mkInput.update();
 
-#if LOG_LEVEL >= 2
-    static unsigned long _lastDumpMs = 0;
+    // Diagnostics + TCP watchdog: print every 5s, detect stuck web server
+    static unsigned long _lastDiagMs = 0;
+    static uint32_t _loopCount = 0;
+    static uint32_t _prevReq = 0;
+    static uint32_t _prevSet = 0;
+    static uint8_t _zeroReqStreak = 0;
+    _loopCount++;
     unsigned long now = millis();
-    if (now - _lastDumpMs >= 5000) {
-        _lastDumpMs = now;
-        String line = "[" + String(now) + "] INPUTS:";
-        for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
-            const OutputChannel& ch = outputController.getChannel(i);
-            if (ch.inputSource != INPUT_MANUAL) {
-                line += " ch" + String(i) + "=" + String(ch.inputSource);
+    if (now - _lastDiagMs >= 5000) {
+        uint32_t elapsed = now - _lastDiagMs;
+        uint32_t loopsPerSec = _loopCount * 1000 / elapsed;
+        uint32_t reqDelta = g_httpReqCount - _prevReq;
+        uint32_t setDelta = g_httpSetCount - _prevSet;
+        Serial.printf("[DIAG] loop=%lu/s heap=%lu req=%lu set=%lu PS4=%s MK=%s\n",
+                      (unsigned long)loopsPerSec,
+                      (unsigned long)ESP.getFreeHeap(),
+                      (unsigned long)reqDelta,
+                      (unsigned long)setDelta,
+                      ps4Input.isConnected() ? "Y" : "N",
+                      mkInput.isConnected() ? "Y" : "N");
+
+        // TCP watchdog: if req=0 for 4 consecutive cycles (20s), reboot.
+        // This recovers from permanently stuck TCP connections.
+        if (reqDelta == 0 && setDelta == 0 && now > 30000) {
+            _zeroReqStreak++;
+            if (_zeroReqStreak >= 4) {
+                Serial.println("[WATCHDOG] Web server stuck (req=0 for 20s) — rebooting!");
+                delay(100);
+                ESP.restart();
             }
+        } else {
+            _zeroReqStreak = 0;
         }
-        line += " | PS4=" + String(ps4Input.isConnected() ? "YES" : "NO");
-        Serial.println(line.c_str());
+
+        _loopCount = 0;
+        _prevReq = g_httpReqCount;
+        _prevSet = g_httpSetCount;
+        _lastDiagMs = now;
     }
-#endif
 }

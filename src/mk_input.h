@@ -38,8 +38,12 @@ public:
 
     bool isConnected() const { return _connected; }
 
+    // mkConnectTask needs direct access
+    friend void mkConnectTask(void* param);
+
 private:
-    bool _connected = false;
+    volatile bool _connected = false;
+    volatile bool _advertising = false;
     float _values[NUM_MK_CHANNELS];
     InputSource _inputSrc[NUM_MK_CHANNELS];
     uint8_t _potIndex[NUM_MK_CHANNELS];

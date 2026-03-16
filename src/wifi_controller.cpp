@@ -3,7 +3,7 @@
 #include "digital_input.h"
 #include "ps4_input.h"
 #include "mk_input.h"
-#include "web_ui.h"
+#include "web_ui_gz.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <Update.h>
@@ -98,10 +98,15 @@ void WiFiController::_setupWiFi() {
     }
 }
 
+// Diagnostics counters (defined in main.cpp)
+extern volatile uint32_t g_httpReqCount;
+extern volatile uint32_t g_httpSetCount;
+
 // Helper: send JSON with Connection: close to free TCP sockets faster
 static void sendJsonClose(AsyncWebServerRequest* req, int code, const String& json) {
+    g_httpReqCount++;
     AsyncWebServerResponse* resp = req->beginResponse(code, "application/json", json);
-    resp->addHeader("Connection", "close");
+    resp->addHeader("Cache-Control", "no-store");
     req->send(resp);
 }
 
@@ -111,70 +116,35 @@ void WiFiController::_setupRoutes() {
     PS4Input* ps4 = _ps4Input;
     MkInput* mk = _mkInput;
 
-    // Serve Web UI
+    // Serve Web UI (gzip compressed: 60KB → 13KB for fast page loads)
     _server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-        request->send_P(200, "text/html", WEB_UI_HTML);
+        AsyncWebServerResponse* resp = request->beginResponse_P(200, "text/html", WEB_UI_GZ, WEB_UI_GZ_LEN);
+        resp->addHeader("Content-Encoding", "gzip");
+        request->send(resp);
     });
 
     // GET /api/state - combined endpoint: outputs + raw inputs in one request.
     // Eliminates multiple concurrent HTTP requests that cause TCP socket exhaustion.
-    _server.on("/api/state", HTTP_GET, [sc, di, ps4, mk](AsyncWebServerRequest* request) {
-        JsonDocument doc;
-        // Outputs (PCA9685 + MK)
-        JsonArray outs = doc["outputs"].to<JsonArray>();
+    // GET /api/state - lightweight poll: just angles + PS4 connected + MK count
+    // Full config is fetched once via /api/outputs on page load
+    _server.on("/api/state", HTTP_GET, [sc, ps4, mk](AsyncWebServerRequest* request) {
+        // Build compact response manually (no ArduinoJson = no heap pressure)
+        String json = "{\"a\":[";
         for (uint8_t i = 0; i < NUM_OUTPUTS; i++) {
-            JsonObject obj = outs.add<JsonObject>();
-            const OutputChannel& ch = sc->getChannel(i);
-            obj["angle"] = ch.currentValue;
-            obj["name"] = ch.name;
-            switch (ch.type) {
-                case OUTPUT_SERVO: obj["type"] = "servo"; break;
-                case OUTPUT_MOTOR: obj["type"] = "motor"; break;
-                case OUTPUT_LEGO:  obj["type"] = "lego";  break;
-                case OUTPUT_PWM:   obj["type"] = "pwm";   break;
-            }
-            obj["input"] = (uint8_t)ch.inputSource;
-            obj["pot"] = ch.potIndex;
-            obj["pwmMin"] = ch.pwmMin;
-            obj["pwmMax"] = ch.pwmMax;
-            obj["digPin"] = ch.digitalPin;
-            obj["digMode"] = ch.digitalMode;
+            if (i) json += ',';
+            json += String((int)roundf(sc->getChannel(i).currentValue));
         }
         if (mk && mk->isConnected()) {
-            static const char* MKN[] = {"MK A","MK B","MK C","MK D","MK E","MK F"};
             for (uint8_t i = 0; i < NUM_MK_CHANNELS; i++) {
-                JsonObject obj = outs.add<JsonObject>();
-                obj["angle"] = mk->getValue(i);
-                obj["name"] = MKN[i];
-                obj["type"] = "motor";
-                obj["input"] = (uint8_t)mk->getInputSource(i);
-                obj["pot"] = mk->getPotIndex(i);
-                obj["pwmMin"] = 0; obj["pwmMax"] = 4095;
-                obj["digPin"] = 0; obj["digMode"] = 0;
+                json += ',';
+                json += String((int)roundf(mk->getValue(i)));
             }
         }
-        // Raw inputs
-        JsonObject ps4obj = doc["ps4"].to<JsonObject>();
-        if (ps4) {
-            const PS4State& s = ps4->getState();
-            ps4obj["connected"] = s.connected;
-            ps4obj["lx"] = s.lx; ps4obj["ly"] = s.ly;
-            ps4obj["rx"] = s.rx; ps4obj["ry"] = s.ry;
-            ps4obj["l2"] = s.l2; ps4obj["r2"] = s.r2;
-            ps4obj["cross"] = s.cross; ps4obj["circle"] = s.circle;
-            ps4obj["square"] = s.square; ps4obj["triangle"] = s.triangle;
-            ps4obj["l1"] = s.l1; ps4obj["r1"] = s.r1;
-        } else {
-            ps4obj["connected"] = false;
-        }
-        JsonArray analog = doc["analog"].to<JsonArray>();
-        for (uint8_t i = 0; i < NUM_POTS; i++) analog.add(analogRead(POT_PINS[i]));
-        JsonArray digital = doc["digital"].to<JsonArray>();
-        for (uint8_t i = 0; i < NUM_POTS; i++) digital.add(di ? di->getPinState(i) : false);
-        // Global freq
-        doc["freq"] = sc->getGlobalFrequency();
-        String json;
-        serializeJson(doc, json);
+        json += "],\"ps4\":";
+        json += (ps4 && ps4->isConnected()) ? '1' : '0';
+        json += ",\"mk\":";
+        json += (mk && mk->isConnected()) ? '1' : '0';
+        json += '}';
         sendJsonClose(request, 200, json);
     });
 
@@ -276,6 +246,7 @@ void WiFiController::_setupRoutes() {
             }
             uint8_t channel = doc["channel"] | 0;
             float angle = doc["angle"] | 90.0f;
+            g_httpSetCount++;
             if (channel >= NUM_OUTPUTS && mk) {
                 mk->setValue(channel - NUM_OUTPUTS, angle);
             } else {
@@ -674,7 +645,7 @@ void WiFiController::_setupRoutes() {
     _server.on("/api/preset-save", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
-        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+        [sc, mk](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
             JsonDocument doc;
             if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
                 request->send(400, "application/json", "{\"error\":\"invalid json\"}");
@@ -685,15 +656,29 @@ void WiFiController::_setupRoutes() {
                 request->send(400, "application/json", "{\"error\":\"missing name\"}");
                 return;
             }
+            // Build preset with PCA + MK channels
+            JsonDocument preset;
+            String pcaJson;
+            sc->getPresetJson(pcaJson);
+            deserializeJson(preset, pcaJson);
+            if (mk) {
+                static const char* SN[] = {"manual","envelope","pot","ps4_lx","ps4_ly","ps4_rx","ps4_ry","ps4_l2","ps4_r2","ps4_cross","ps4_circle","ps4_square","ps4_tri","ps4_l1","ps4_r1","sequence","digital"};
+                JsonArray mkArr = preset["mk"].to<JsonArray>();
+                for (uint8_t i = 0; i < NUM_MK_CHANNELS; i++) {
+                    JsonObject obj = mkArr.add<JsonObject>();
+                    InputSource src = mk->getInputSource(i);
+                    obj["input"] = (src < 17) ? SN[src] : "manual";
+                    obj["value"] = (int)roundf(mk->getValue(i));
+                    obj["pot"] = mk->getPotIndex(i);
+                }
+            }
             String path = String(PRESET_DIR) + "/" + String(name) + ".json";
-            String presetJson;
-            sc->getPresetJson(presetJson);
             File file = LittleFS.open(path, "w");
             if (!file) {
                 request->send(500, "application/json", "{\"error\":\"file create failed\"}");
                 return;
             }
-            file.print(presetJson);
+            serializeJson(preset, file);
             file.close();
             Serial.printf("[Preset] Saved '%s'\n", name);
             request->send(200, "application/json", "{\"ok\":true}");
@@ -704,7 +689,7 @@ void WiFiController::_setupRoutes() {
     _server.on("/api/preset-load", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
         nullptr,
-        [sc](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
+        [sc, mk](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
             JsonDocument doc;
             if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
                 request->send(400, "application/json", "{\"error\":\"invalid json\"}");
@@ -731,9 +716,32 @@ void WiFiController::_setupRoutes() {
             file.read(buf, fLen);
             file.close();
             bool ok = sc->applyPresetJson(buf, fLen);
+            // Also restore MK channels from preset
+            if (ok && mk) {
+                JsonDocument preset;
+                deserializeJson(preset, buf, fLen);
+                JsonArray mkArr = preset["mk"];
+                if (!mkArr.isNull()) {
+                    static const char* SN[] = {"manual","envelope","pot","ps4_lx","ps4_ly","ps4_rx","ps4_ry","ps4_l2","ps4_r2","ps4_cross","ps4_circle","ps4_square","ps4_tri","ps4_l1","ps4_r1","sequence","digital"};
+                    uint8_t mi = 0;
+                    for (JsonObject obj : mkArr) {
+                        if (mi >= NUM_MK_CHANNELS) break;
+                        mk->setValue(mi, (float)(obj["value"] | 90));
+                        mk->setPotIndex(mi, obj["pot"] | 0);
+                        const char* inStr = obj["input"] | "manual";
+                        InputSource src = INPUT_MANUAL;
+                        for (int s = 0; s < 17; s++) {
+                            if (strcmp(inStr, SN[s]) == 0) { src = (InputSource)s; break; }
+                        }
+                        mk->setInputSource(mi, src);
+                        mi++;
+                    }
+                }
+            }
             free(buf);
             if (ok) {
                 Serial.printf("[Preset] Loaded '%s'\n", name);
+                // Return compact state — just ok flag. JS will fetchState after.
                 request->send(200, "application/json", "{\"ok\":true}");
             } else {
                 request->send(500, "application/json", "{\"error\":\"parse failed\"}");

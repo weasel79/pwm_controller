@@ -151,7 +151,7 @@ const char WEB_UI_HTML[] PROGMEM = R"rawliteral(
 <h1>Universal PWM Control</h1>
 <div id="status">Connecting...</div>
 <div class="grid" id="outputs"></div>
-<div id="mkSection" style="display:none;max-width:1200px;margin:16px auto;text-align:center;">
+<div id="mkSection" style="max-width:1200px;margin:16px auto;text-align:center;">
   <button id="mkConnBtn" onclick="mkToggleConnect()" style="padding:6px 16px;border:none;border-radius:4px;background:#f5a623;color:#000;font-size:13px;font-weight:600;cursor:pointer;">Reconnect MK</button>
   <span id="mkStatus" style="font-size:13px;color:#aaa;margin-left:8px;"></span>
 </div>
@@ -469,7 +469,9 @@ function updateCardUI(ch) {
 }
 
 function fetchState() {
-  fetch('/api/outputs').then(r => r.json()).then(data => {
+  var ac = new AbortController();
+  setTimeout(function() { ac.abort(); }, 5000);
+  fetch('/api/outputs?t=' + Date.now(), {signal: ac.signal}).then(r => r.json()).then(data => {
     if (Array.isArray(data)) {
       // Show/hide MK cards based on whether server returned > 16 channels
       var hasMK = data.length > PCA_NUM;
@@ -478,9 +480,9 @@ function fetchState() {
         var c = document.getElementById('card' + m);
         if (c) c.style.display = hasMK ? '' : 'none';
       }
-      // Update MK section visibility
+      // MK section (connect button) always visible — only cards hide/show
       var mkSec = document.getElementById('mkSection');
-      if (mkSec) mkSec.style.display = hasMK ? '' : 'none';
+      if (mkSec) mkSec.style.display = '';
       data.forEach((s, i) => {
         if (i < TOTAL) {
           angles[i] = s.angle;
@@ -628,24 +630,31 @@ function onSlider(ch, val) {
 
 function flushSlider() {
   sendTimer = null;
-  // Don't fire a new request while the previous one is still in-flight
-  if (sliderSending) { sendTimer = setTimeout(flushSlider, 30); return; }
+  // Auto-reset stuck sends after 3 seconds
+  if (sliderSending) {
+    if (sliderSendAge && Date.now() - sliderSendAge > 3000) sliderSending = false;
+    else { sendTimer = setTimeout(flushSlider, 30); return; }
+  }
   if (pendingChannel < 0) return;
   sliderSending = true;
+  sliderSendAge = Date.now();
   var ch = pendingChannel, a = pendingAngle;
   pendingChannel = -1;
+  var ac = new AbortController();
+  setTimeout(function() { ac.abort(); }, 3000);
   fetch('/api/output', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({channel: ch, angle: a})
+    body: JSON.stringify({channel: ch, angle: a}),
+    signal: ac.signal
   }).then(function() {
     sliderSending = false;
-    // If a new value arrived while we were sending, flush it immediately
     if (pendingChannel >= 0) { sendTimer = setTimeout(flushSlider, 0); }
   }).catch(function() {
     sliderSending = false;
   });
 }
+var sliderSendAge = 0;
 
 // --- Per-Channel Sequence Recording & Playback ---
 
@@ -978,13 +987,20 @@ function presetSave() {
   });
 }
 function presetLoad(name) {
+  var ac = new AbortController();
+  setTimeout(function() { ac.abort(); }, 5000);
   fetch('/api/preset-load', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name: name})
-  }).then(() => {
-    document.getElementById('status').textContent = 'Preset loaded: ' + name;
-    fetchState();
+    body: JSON.stringify({name: name}),
+    signal: ac.signal
+  }).then(function(r) { return r.json(); }).then(function() {
+    document.getElementById('status').textContent = 'Preset loaded: ' + name + ' — reloading...';
+    // Reload page to pick up all new values (13KB gzip, loads fast)
+    setTimeout(function() { location.reload(); }, 500);
+  }).catch(function() {
+    document.getElementById('status').textContent = 'Preset load failed — retrying...';
+    setTimeout(function() { presetLoad(name); }, 2000);
   });
 }
 function presetDelete(name) {
@@ -1517,51 +1533,55 @@ function hasActivePlayback() {
 
 function startRawPoll() {
   if (rawPollTimer) return;
-  rawPollTimer = setInterval(pollRawInputs, 1000);
+  rawPollTimer = setInterval(pollRawInputs, 1500);
 }
 
+var pollInFlight = false;
+var pollAbort = null;  // AbortController for current poll
+
 function pollRawInputs() {
+  // Auto-reset stuck polls after 4 seconds
+  if (pollInFlight) return;
   // Reduce poll rate while sliders are being dragged (skip 3 of 4 cycles)
   if ((sliderDragging || mkDragging) && ++pollSkipCount % 4 !== 0) return;
-  // Reduce poll rate during active playback (skip every other cycle)
-  if (hasActivePlayback() && ++pollSkipCount % 2 === 0) return;
-  // When PS4 is connected, only fetch /api/outputs to reduce WiFi traffic.
-  // Every 10th cycle (~5s), do a full raw-inputs poll to detect PS4 disconnect.
-  if (ps4Connected && ++ps4PollSkip < 10) {
-    fetch('/api/outputs').then(function(r) { return r.json(); }).then(function(data) {
-      if (!Array.isArray(data)) return;
-      for (var i = 0; i < NUM && i < data.length; i++) {
+
+  pollInFlight = true;
+  // Abort any stuck previous request
+  if (pollAbort) pollAbort.abort();
+  pollAbort = new AbortController();
+  var timeoutId = setTimeout(function() { pollAbort.abort(); }, 4000);
+
+  fetch('/api/state?t=' + Date.now(), {signal: pollAbort.signal}).then(function(r) { return r.json(); }).then(function(data) {
+    clearTimeout(timeoutId);
+    pollInFlight = false;
+    // Compact format: {a:[angles...], ps4:0/1, mk:0/1}
+    ps4Connected = !!data.ps4;
+    // Detect MK connection change
+    var hasMK = !!data.mk;
+    if (hasMK !== mkConnected) {
+      mkConnected = hasMK;
+      NUM = hasMK ? TOTAL : PCA_NUM;
+      for (var m = MK_START; m < TOTAL; m++) {
+        var c = document.getElementById('card' + m);
+        if (c) c.style.display = hasMK ? '' : 'none';
+      }
+      mkUpdateUI();
+      if (hasMK) fetchState();  // full refresh on MK connect
+    }
+    // Update angles for externally-driven channels
+    var aa = data.a;
+    if (aa) {
+      for (var i = 0; i < aa.length && i < TOTAL; i++) {
         var src = inputs[i];
         if (src === 'manual' || src === 'envelope' || src === 'sequence') continue;
-        var a = Math.round(data[i].angle);
-        angles[i] = a;
-        document.getElementById('val' + i).textContent = formatValue(i, a);
+        angles[i] = aa[i];
+        var valEl = document.getElementById('val' + i);
+        if (valEl) valEl.textContent = formatValue(i, aa[i]);
         var extSl = document.getElementById('extSl' + i);
-        if (extSl) extSl.value = a;
+        if (extSl) extSl.value = aa[i];
       }
-    }).catch(function() {});
-    return;
-  }
-  ps4PollSkip = 0;
-  fetch('/api/raw-inputs').then(function(r) { return r.json(); }).then(function(data) {
-    rawInputs = data;
-    // Track PS4 connection state to reduce polling when connected
-    if (data && data.ps4) ps4Connected = !!data.ps4.connected;
-    updateRawValues();
-    // Chain outputs fetch after raw-inputs completes (sequential, not parallel)
-    return fetch('/api/outputs');
-  }).then(function(r) { return r.json(); }).then(function(data) {
-    if (!Array.isArray(data)) return;
-    for (var i = 0; i < NUM && i < data.length; i++) {
-      var src = inputs[i];
-      if (src === 'manual' || src === 'envelope' || src === 'sequence') continue;
-      var a = Math.round(data[i].angle);
-      angles[i] = a;
-      document.getElementById('val' + i).textContent = formatValue(i, a);
-      var extSl = document.getElementById('extSl' + i);
-      if (extSl) extSl.value = a;
     }
-  }).catch(function() {});
+  }).catch(function() { clearTimeout(timeoutId); pollInFlight = false; });
 }
 
 function updateRawValues() {

@@ -174,3 +174,51 @@ Added mDNS (http://pwm.local). Renamed project from servo-geloet-esp32.
 ## Updated Build Stats
 - RAM: ~18.8%, Flash: ~62.2%
 - No external BLE libraries needed (NimBLE/MouldKingino removed)
+
+---
+
+## Session — 2026-03-16 — TCP stability, gzip UI, preset MK support, PS4 init order
+
+### Summary
+Major session focused on TCP/WiFi stability under PS4+MK+WiFi load.
+Gzip-compressed the web UI (60KB→13KB). Fixed PS4 init order. Added MK channels
+to presets. Implemented TCP watchdog, compact poll endpoint, and fetch abort timeouts.
+
+### Key findings
+- **`Connection: close` makes TCP WORSE**: Closed connections enter TIME_WAIT for 120s, each holding a lwIP PCB slot. With polling every 1.5s, PCB pool exhausts in ~30s → req=0. Removed.
+- **BLE GAP callback overhead**: Registering `esp_ble_gap_register_callback` starts BLE event processing that competes with lwIP on core 0 even when not advertising. Fix: removed callback, use synchronous advertising (stop → set data → 5ms delay → start).
+- **BLE GAP deferred init**: Moving `esp_ble_gap_register_callback` from `init()` to first `connect()` call saves ~10KB heap when MK isn't used.
+- **PS4 must init BEFORE MK**: PS4 library sets BT MAC via `esp_base_mac_addr_set` then calls `btStart()`. If MK calls `btStart()` first, MAC is already set with default. Fix: PS4 init first, MK piggybacks on existing Bluedroid.
+- **`/api/state` compact poll**: Replaced heavy JSON (ArduinoJson + full channel config) with hand-built ~100 byte response `{"a":[angles...],"ps4":0,"mk":0}`. Eliminates 4-8KB heap churn per poll.
+- **Gzip web UI**: 60KB → 13KB (78% reduction). `compress_ui.py` extracts HTML from `web_ui.h`, gzips, writes C byte array to `web_ui_gz.h`. Served with `Content-Encoding: gzip`. Must re-run after editing `web_ui.h`.
+- **Fetch abort timeouts**: All browser fetch calls now use `AbortController` with 3-5s timeout. Prevents stuck TCP connections from blocking all future requests indefinitely.
+- **TCP watchdog**: If `req=0` for 20 consecutive seconds (4 diag cycles), ESP auto-reboots to recover from permanently stuck TCP.
+- **MK advertising oscillation**: PS4 stick jitter around center (±2 values) caused rapid advertise/stop toggling. Fix: ±2 deadzone snaps to center.
+- **Preset load page reload**: After preset load, page reloads instead of trying to fetch state separately (competing for TCP connections). 13KB gzip page loads fast.
+- **Dropbox .pio ignore**: `.dropboxignore` + NTFS alternate data stream `com.dropbox.ignored` prevents Dropbox from locking build artifacts.
+
+### Architecture changes
+- `compress_ui.py` — build tool: HTML → gzip → C byte array
+- `web_ui_gz.h` — auto-generated gzip compressed web UI (do not edit directly)
+- `/api/state` — compact poll endpoint (~100 bytes, no ArduinoJson)
+- MK connect runs in FreeRTOS background task (non-blocking)
+- MK BLE advertising: no GAP callback, synchronous with 5ms delay, 40ms interval
+- Presets now include MK channels (`"mk"` key in JSON)
+- TCP watchdog auto-reboots after 20s of req=0
+
+### Issues
+- AsyncTCP rx/ack timeouts still occur intermittently under heavy BT+WiFi load
+- Website can become temporarily unreachable after MK connect (BLE init overhead)
+- ESPAsyncWebServer may have inherent connection handling issues
+
+### To-do
+- Consider replacing ESPAsyncWebServer with lighter alternative
+- Consider Server-Sent Events (SSE) to replace polling entirely
+- ELRS RC input (Phase 1)
+- Scripting engine (Phase 2)
+- Blockly visual editor (Phase 3)
+
+### Ideas
+- External web app hosted on PC for advanced scripting/Blockly (uses REST API directly)
+- Move to ESP32-S3 for more heap/flash and better WiFi
+- WebSocket instead of REST for real-time bidirectional communication
